@@ -1,0 +1,70 @@
+{
+  "name": "istel",
+  "version": "1.0.0",
+  "description": "Istel — a sleek always-on-top island overlay for Windows with media controls, clipboard, shelf and calendar integration",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"vite\" \"wait-on http://localhost:9090 && node run-electron.js\"",
+    "build": "vite build",
+    "dist": "npm run build && electron-builder",
+    "postinstall": "electron-builder install-app-deps",
+    "pack": "npm run build && electron-builder --dir",
+    "test": "node --test src/utils/*.test.mjs"
+  },
+  "keywords": [
+    "dynamic-island",
+    "overlay",
+    "windows",
+    "media-controls"
+  ],
+  "author": "Aditya Srivastava",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "discord-rpc": "^4.0.1",
+    "framer-motion": "^12.38.0",
+    "phosphor-react": "^1.4.1",
+    "qrcode-generator": "^2.0.4",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^41.1.0",
+    "electron-builder": "^26.8.1",
+    "vite": "^8.0.3",
+    "wait-on": "^9.0.4"
+  },
+  "build": {
+    "appId": "com.istel.app",
+    "productName": "Istel",
+    "forceCodeSigning": false,
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "assets/**/*",
+      "config.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Istel",
+      "runAfterFinish": true
+    }
+  }
+}
