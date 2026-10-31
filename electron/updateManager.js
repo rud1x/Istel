@@ -7,7 +7,7 @@
 
 const https = require('https');
 
-const REPO = 'rud1x/Islet';
+const REPO = 'rud1x/Istel';
 const CHECK_INTERVAL = 6 * 60 * 60 * 1000; // 6h
 
 function compareVersions(a, b) {

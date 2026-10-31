@@ -79,7 +79,7 @@ public class Audio {
 $lvl = [Audio]::GetLevel()
 $pct = [math]::Round($lvl * 100)
 $mute = if ([Audio]::GetMute()) { 1 } else { 0 }
-Write-Output "VOL:$pct|$mute|$($env:ISTEL_DEVICE_NAME)"
+Write-Output "VOL:$pct|$mute|$($env:Istel_DEVICE_NAME)"
 `;
 
 const VOLUME_SET_SCRIPT_CONTENT = `

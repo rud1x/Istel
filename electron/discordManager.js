@@ -178,7 +178,7 @@ class DiscordManager {
       smallImageKey: this._platformKey(mediaState.source),
       smallImageText: this._platformName(mediaState.source),
       instance: false,
-      buttons: [{ label: 'Скачать Istel', url: 'https://github.com/rud1x/Islet' }],
+      buttons: [{ label: 'Скачать Istel', url: 'https://github.com/rud1x/Istel' }],
     };
 
     // Live progress bar: Discord shows a timer between start and end.
