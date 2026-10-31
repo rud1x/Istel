@@ -1,8 +1,6 @@
 <img src="./assets/logo.svg" width="120" align="left" />
 
-## Istel
-*[Распространяется по лицензии MIT](./LICENSE)*
-
+## Istel 
 Оверлей-островок для рабочего стола Windows — музыка, буфер обмена, полка, закреплённые ярлыки, календарь, Pomodoro, погода, батарея, индикаторы приватности и Discord Rich Presence в одной анимированной капсуле.
 
 [![Платформа](https://img.shields.io/badge/Платформа-Windows-111111.svg)](#)
