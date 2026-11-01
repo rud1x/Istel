@@ -48,7 +48,7 @@
 
 ## Установка
 
-Скачай **Istel Setup 1.0.0.exe** со страницы [Releases](../../releases) и запусти.
+Скачай **Istel Setup 1.0.1.exe** со страницы [Releases](../../releases) и запусти.
 
 Или запуск из исходников:
 
@@ -62,7 +62,7 @@
 ## Сборка
 
     npm run pack    # распакованная сборка -> dist-electron/win-unpacked/Istel.exe
-    npm run dist    # установщик NSIS -> dist-electron/Istel Setup 1.0.0.exe
+    npm run dist    # установщик NSIS -> dist-electron/Istel Setup 1.0.1.exe
 
 <details>
 <summary>Windows: ошибка «Cannot create symbolic link» при сборке</summary>
