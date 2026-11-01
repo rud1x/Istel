@@ -1,13 +1,21 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { ClipboardText, Image as ImageIcon, File, X, Trash, Check } from 'phosphor-react';
 
 function BufferWidget({ items = [] }) {
   const [copiedId, setCopiedId] = useState(null);
+  const copiedTimerRef = useRef(null);
+
+  // Clear any pending "copied" timeout on unmount (R5) so we never setState
+  // on an unmounted component when the tab is switched quickly.
+  useEffect(() => () => {
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+  }, []);
 
   const handlePaste = (item) => {
     window.electronAPI?.clipboardPaste?.(item.id);
     setCopiedId(item.id);
-    setTimeout(() => setCopiedId((cur) => (cur === item.id ? null : cur)), 1200);
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = setTimeout(() => setCopiedId((cur) => (cur === item.id ? null : cur)), 1200);
   };
 
   const handleDelete = (e, item) => {

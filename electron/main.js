@@ -78,6 +78,31 @@ let pomodoroManager = null;
 let discordManager = null;
 let updateManager = null;
 
+// Separate media poller used only during fullscreen, feeding Discord RPC
+// without touching the game's audio endpoint.
+let discordOnlyPollTimer = null;
+function startDiscordOnlyPolling() {
+  if (!discordManager || !mediaManager) return;
+  if (discordOnlyPollTimer) return;
+  const tick = () => {
+    // forceUpdate() queries SMTC without starting/stopping the audio endpoint
+    // poll, and routes through the same Discord update path.
+    mediaManager.forceUpdate()
+      .then((state) => {
+        if (state) discordManager.update(state);
+      })
+      .catch(() => {});
+  };
+  tick();
+  discordOnlyPollTimer = setInterval(tick, 2000);
+}
+function stopDiscordOnlyPolling() {
+  if (discordOnlyPollTimer) {
+    clearInterval(discordOnlyPollTimer);
+    discordOnlyPollTimer = null;
+  }
+}
+
 // Parse CLI Flags
 const isStartMinimized = process.argv.includes('--start-minimized');
 
@@ -156,11 +181,15 @@ function bootstrap() {
   // 3. Start polling services
   mediaManager = new MediaManager();
   lyricsManager = new LyricsManager(monitorManager);
-  mediaManager.startPolling((mediaState) => {
+  // Single source of truth for the media pipeline. SuspendController must
+  // restart polling with THIS callback, otherwise the Discord pipeline is
+  // silently dropped after the first fullscreen suspend (B1).
+  const onMediaState = (mediaState) => {
     monitorManager.broadcastToAll('media-update', mediaState);
     lyricsManager.update(mediaState);
     discordManager?.update(mediaState);
-  });
+  };
+  mediaManager.startPolling(onMediaState);
 
   calendarManager = new CalendarManager();
   
@@ -224,10 +253,13 @@ function bootstrap() {
   // Wire fullscreen detection to a global suspend (freeze every polling
   // service so a game is never disturbed: no audio touch, no CPU churn).
   suspendController = new SuspendController();
-  suspendController.register('media', mediaManager, () => mediaManager.startPolling((mediaState) => {
-    monitorManager.broadcastToAll('media-update', mediaState);
-    lyricsManager.update(mediaState);
-  }));
+  suspendController.register('media', mediaManager, () => mediaManager.startPolling(onMediaState));
+  // Discord Rich Presence must keep tracking the track during fullscreen too.
+  // We cannot reuse mediaManager (its SMTC poll touches the audio endpoint and
+  // is suspended so a game keeps exclusive audio), so we run a SEPARATE, light
+  // poller that only feeds Discord. It is not registered with SuspendController
+  // and is started/stopped by the fullscreen transition itself.
+  startDiscordOnlyPolling();
   suspendController.register('volume', volumeManager);
   suspendController.register('systemInfo', systemInfoManager);
   suspendController.register('clipboard', clipboardManager, () => clipboardManager.startPolling((clipboardState) => {
@@ -245,7 +277,13 @@ function bootstrap() {
       monitorManager.broadcastToAll('calendar-update', events);
     }));
   }
-  fullscreenManager.onHiddenChange = (hidden) => suspendController.setSuspended(hidden);
+  fullscreenManager.onHiddenChange = (hidden) => {
+    suspendController.setSuspended(hidden);
+    // While the game owns the audio device we switch to the Discord-only
+    // poller; on resume the normal pipeline takes over again.
+    if (hidden) startDiscordOnlyPolling();
+    else stopDiscordOnlyPolling();
+  };
 
   settingsWindow = new SettingsWindow(isDev);
 
@@ -386,6 +424,19 @@ ipcMain.handle('open-source-app', (_event, sourceId) => {
 });
 ipcMain.handle('open-path', (_event, filePath) => {
   shell.openPath(filePath);
+});
+
+// Open a URL in the user's default browser. shell.openPath only opens local
+// files, so it silently fails on https:// links (the update banner's
+// "Download" button was dead because of this).
+ipcMain.handle('open-external', (_event, url) => {
+  try {
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return false;
+    shell.openExternal(url);
+    return true;
+  } catch {
+    return false;
+  }
 });
 
 ipcMain.handle('shelf-save', (_event, items) => {

@@ -8,6 +8,7 @@
 const { execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { restartPolling } = require('./lib/pollingLifecycle.cjs');
 
 // Polling intervals
 const POLL_INTERVAL = 500;        // 500ms for live seekbar updates
@@ -239,14 +240,15 @@ class MediaManager {
               if (this.callback) this.callback(state);
             }, 120);
           } else {
-            // Same track — update position immediately (no debounce)
-            // But skip artwork in the payload if it hasn't changed
-            // to reduce IPC data transfer
-            if (state.artwork && state.artwork === this._lastArtwork) {
-              state.artwork = '__same__'; // sentinel value
-            } else if (state.artwork) {
-              this._lastArtwork = state.artwork;
-            }
+            // Same track — update position immediately (no debounce).
+            // Track whether the artwork changed, but keep the real base64 on
+            // the state: Discord must always receive actual bytes (the
+            // '__same__' sentinel made artwork uploads silently skip on the
+            // first tick after a track change). The renderer still gets a
+            // hint via `artworkUnchanged` so it can avoid re-decoding.
+            const artworkUnchanged = !!(state.artwork && state.artwork === this._lastArtwork);
+            if (state.artwork && !artworkUnchanged) this._lastArtwork = state.artwork;
+            state.artworkUnchanged = artworkUnchanged;
             this.currentState = state;
             if (this.callback) this.callback(state);
           }
@@ -262,7 +264,7 @@ class MediaManager {
     };
 
     poll();
-    this.pollTimer = setInterval(poll, POLL_INTERVAL);
+    restartPolling(this, () => setInterval(poll, POLL_INTERVAL));
   }
 
   stopPolling() {

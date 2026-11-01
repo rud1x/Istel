@@ -59,6 +59,8 @@ class PrivacyManager {
 
   startPolling(callback) {
     this.callback = callback;
+    // Idempotent (R4): never create parallel timers after a fullscreen cycle.
+    if (this.pollTimer) return;
     
     const poll = () => {
       if (!this.enabled) {
@@ -97,6 +99,7 @@ class PrivacyManager {
       this.pollTimer = null;
     }
   }
+
 
   getCurrentState() {
     return this.currentState;
@@ -152,10 +155,13 @@ class PrivacyManager {
           
           try {
             const raw = stdout.trim();
-            // Powershell might output empty, a single object, or an array
+            // PowerShell may prepend warnings/BOM. Slice from the first JSON
+            // token so a noisy line does not blank the indicator (R6).
             let data = [];
             if (raw) {
-               data = JSON.parse(raw);
+               const start = raw.search(/[\[{]/);
+               const clean = start >= 0 ? raw.slice(start) : raw;
+               data = JSON.parse(clean);
                if (!Array.isArray(data)) data = [data];
             }
 

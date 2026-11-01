@@ -89,10 +89,19 @@ class SystemInfoManager {
   setCity(name) {
     this.city = (name || '').trim();
     this.coords = null;
+    // Clearing the city must not leave stale weather from the old city on
+    // screen (R13): wipe it before refetching.
+    if (!this.city) {
+      this.weather = null;
+      this._broadcast('system-info-update', this.getState());
+    }
     this._refreshWeather();
   }
 
   start() {
+    // Idempotent (R3): a second start() (e.g. after fullscreen resume) must
+    // not create parallel timers.
+    if (this.langTimer || this.weatherTimer) return;
     this._pollLang();
     this.langTimer = setInterval(() => this._pollLang(), LANG_POLL_INTERVAL);
 
@@ -101,8 +110,8 @@ class SystemInfoManager {
   }
 
   stop() {
-    if (this.langTimer) clearInterval(this.langTimer);
-    if (this.weatherTimer) clearInterval(this.weatherTimer);
+    if (this.langTimer) { clearInterval(this.langTimer); this.langTimer = null; }
+    if (this.weatherTimer) { clearInterval(this.weatherTimer); this.weatherTimer = null; }
   }
 
   getState() {
@@ -166,10 +175,12 @@ class SystemInfoManager {
       try {
         const req = net.request(url);
         req.setHeader('User-Agent', 'curl/8');
+        const timer = setTimeout(() => { try { req.abort(); } catch {} resolve(null); }, 7000);
         req.on('response', (res) => {
           let data = '';
           res.on('data', (c) => (data += c));
           res.on('end', () => {
+            clearTimeout(timer);
             try {
               const j = JSON.parse(data);
               const cur = j && j.current_condition && j.current_condition[0];
@@ -189,7 +200,7 @@ class SystemInfoManager {
             }
           });
         });
-        req.on('error', () => resolve(null));
+        req.on('error', () => { clearTimeout(timer); resolve(null); });
         req.end();
       } catch {
         resolve(null);
@@ -204,10 +215,12 @@ class SystemInfoManager {
       try {
         const req = net.request(url);
         req.setHeader('User-Agent', 'IslandApp/1.0');
+        const timer = setTimeout(() => { try { req.abort(); } catch {} resolve(null); }, 7000);
         req.on('response', (res) => {
           let data = '';
           res.on('data', (c) => (data += c));
           res.on('end', () => {
+            clearTimeout(timer);
             try {
               const j = JSON.parse(data);
               const r = j && j.results && j.results[0];
@@ -221,7 +234,7 @@ class SystemInfoManager {
             }
           });
         });
-        req.on('error', () => resolve(null));
+        req.on('error', () => { clearTimeout(timer); resolve(null); });
         req.end();
       } catch {
         resolve(null);
@@ -234,10 +247,12 @@ class SystemInfoManager {
       try {
         const req = net.request('https://ipwho.is/');
         req.setHeader('User-Agent', 'IslandApp/1.0');
+        const timer = setTimeout(() => { try { req.abort(); } catch {} resolve(null); }, 7000);
         req.on('response', (res) => {
           let data = '';
           res.on('data', (c) => (data += c));
           res.on('end', () => {
+            clearTimeout(timer);
             try {
               const j = JSON.parse(data);
               if (j && j.success !== false && j.latitude != null && j.longitude != null) {
@@ -250,7 +265,7 @@ class SystemInfoManager {
             }
           });
         });
-        req.on('error', () => resolve(null));
+        req.on('error', () => { clearTimeout(timer); resolve(null); });
         req.end();
       } catch {
         resolve(null);
@@ -264,10 +279,12 @@ class SystemInfoManager {
       try {
         const req = net.request(url);
         req.setHeader('User-Agent', 'IslandApp/1.0');
+        const timer = setTimeout(() => { try { req.abort(); } catch {} resolve(null); }, 7000);
         req.on('response', (res) => {
           let data = '';
           res.on('data', (c) => (data += c));
           res.on('end', () => {
+            clearTimeout(timer);
             try {
               const j = JSON.parse(data);
               const cur = j && j.current;

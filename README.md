@@ -8,7 +8,7 @@
 [![Платформа](https://img.shields.io/badge/Платформа-Windows-111111.svg)](#)
 [![Electron](https://img.shields.io/badge/Electron-41-111111.svg)](#)
 [![React](https://img.shields.io/badge/React-19-111111.svg)](#)
-[![Версия](https://img.shields.io/badge/Версия-1.0.0-111111.svg)](#)
+[![Версия](https://img.shields.io/badge/Версия-1.0.1-111111.svg)](#)
 
 <br clear="left"/>
 

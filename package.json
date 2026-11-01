@@ -1,6 +1,6 @@
 {
   "name": "istel",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Istel — a sleek always-on-top island overlay for Windows with media controls, clipboard, shelf and calendar integration",
   "main": "electron/main.js",
   "scripts": {
@@ -9,7 +9,7 @@
     "dist": "npm run build && electron-builder",
     "postinstall": "electron-builder install-app-deps",
     "pack": "npm run build && electron-builder --dir",
-    "test": "node --test src/utils/*.test.mjs"
+    "test": "node --test electron/lib/*.test.mjs src/utils/*.test.mjs"
   },
   "keywords": [
     "dynamic-island",

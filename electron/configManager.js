@@ -1,6 +1,7 @@
 const { app } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { parseConfigText, tempConfigPath, corruptBackupPath } = require('./lib/configIO.cjs');
 
 class ConfigManager {
   constructor() {
@@ -54,8 +55,16 @@ class ConfigManager {
     try {
       if (fs.existsSync(this.configPath)) {
         const data = fs.readFileSync(this.configPath, 'utf8');
-        const userConfig = JSON.parse(data);
-        return { ...defaults, ...userConfig };
+        const { corrupt, parsed } = parseConfigText(data);
+        if (corrupt) {
+          // Preserve the broken file so the user can recover it, instead of
+          // silently wiping every setting (B15).
+          const backup = corruptBackupPath(this.configPath, Date.now());
+          try { fs.copyFileSync(this.configPath, backup); } catch {}
+          console.error('[ConfigManager] Corrupt config backed up to', backup);
+          return { ...defaults };
+        }
+        if (parsed) return { ...defaults, ...parsed };
       }
     } catch (err) {
       console.error('[ConfigManager] Error loading user config:', err);
@@ -74,8 +83,12 @@ class ConfigManager {
   }
 
   _save() {
+    // Atomic write: write to a temp file, then rename. A crash mid-write
+    // leaves the old config intact instead of a truncated JSON (B14).
     try {
-      fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2), 'utf8');
+      const tmp = tempConfigPath(this.configPath);
+      fs.writeFileSync(tmp, JSON.stringify(this.config, null, 2), 'utf8');
+      fs.renameSync(tmp, this.configPath);
     } catch (err) {
       console.error('[ConfigManager] Error saving config.json:', err);
     }

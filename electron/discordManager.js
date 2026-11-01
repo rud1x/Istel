@@ -6,6 +6,7 @@
 // ============================================================
 
 const https = require('https');
+const { decideActivityPush, artworkKey, shouldPrimeArtwork } = require('./lib/discordSync.cjs');
 
 let RPC = null;
 try {
@@ -153,6 +154,13 @@ class DiscordManager {
       return;
     }
 
+    this._currentTitle = mediaState.title;
+    this._currentArtist = mediaState.artist;
+    this._currentMediaState = mediaState;
+    // Start the artwork upload NOW, even if we don't push an activity this
+    // tick. Otherwise the first push always carries the placeholder and the
+    // cover only appears on the next 10s resync (or never on a short track).
+    this._primeArtwork(mediaState);
     const isPlaying = mediaState.playbackStatus === 'Playing';
     const duration = Number(mediaState.duration) || 0;
     // Real position = SMTC snapshot + age since LastUpdatedTime (while playing).
@@ -162,10 +170,17 @@ class DiscordManager {
     const key = `${mediaState.title}|${mediaState.artist}|${mediaState.playbackStatus}`;
     // Re-sync periodically (every ~10s) so the Discord timer stays aligned with
     // the real playback position even on the same track.
-    const needResync = isPlaying && (Date.now() - this._lastSyncAt > 10000);
-    if (key === this._lastKey && !needResync) return;
+    const decision = decideActivityPush({
+      key,
+      lastKey: this._lastKey,
+      lastSyncAt: this._lastSyncAt,
+      now: Date.now(),
+      isPlaying,
+      resyncMs: 10000,
+    });
+    if (!decision.push) return;
     this._lastKey = key;
-    this._lastSyncAt = Date.now();
+    this._lastSyncAt = decision.nextSyncAt;
 
     const activity = {
       // type 2 = "Listening to" (shows as 'Listening' in the profile).
@@ -229,29 +244,46 @@ class DiscordManager {
     }
   }
 
+  // Start (or reuse) an artwork upload for the current track. Safe to call
+  // on every media tick: guarded by the cache and the in-flight set.
+  _primeArtwork(mediaState) {
+    const trackKey = artworkKey(mediaState.title, mediaState.artist);
+    const cached = this._coverCache.get(trackKey);
+    const cachedValid = !!(cached && cached.exp > Date.now());
+    if (!shouldPrimeArtwork({
+      artwork: mediaState.artwork,
+      cached: cachedValid,
+      uploading: this._coverUploading.has(trackKey),
+    })) return;
+
+    this._coverUploading.add(trackKey);
+    try {
+      const buf = Buffer.from(mediaState.artwork, 'base64');
+      uploadCover(buf).then((url) => {
+        this._coverUploading.delete(trackKey);
+        if (url) {
+          this._coverCache.set(trackKey, { url, exp: Date.now() + 55 * 60 * 1000 });
+          // Force a refresh ONLY if the current track is still the one this
+          // upload belongs to (B5).
+          const currentKey = artworkKey(this._currentTitle, this._currentArtist);
+          if (currentKey === trackKey) {
+            this._lastKey = null;
+            // Push the cover immediately once the upload completes, without
+            // waiting for the 10s resync.
+            if (this._currentMediaState) this.update(this._currentMediaState);
+          }
+        }
+      }).catch(() => { this._coverUploading.delete(trackKey); });
+    } catch (e) {
+      this._coverUploading.delete(trackKey);
+    }
+  }
+
   _coverUrl(mediaState) {
-    const trackKey = `${mediaState.title || ''}|${mediaState.artist || ''}`;
+    const trackKey = artworkKey(mediaState.title, mediaState.artist);
     const cached = this._coverCache.get(trackKey);
     if (cached && cached.exp > Date.now()) return cached.url;
-
-    // Kick off an upload (once per track) — the NEXT status push will use it.
-    if (!cached && !this._coverUploading.has(trackKey) && mediaState.artwork && mediaState.artwork.length > 100) {
-      this._coverUploading.add(trackKey);
-      try {
-        const buf = Buffer.from(mediaState.artwork, 'base64');
-        uploadCover(buf).then((url) => {
-          this._coverUploading.delete(trackKey);
-          if (url) {
-            this._coverCache.set(trackKey, { url, exp: Date.now() + 55 * 60 * 1000 });
-            // Force a refresh so the new artwork appears without waiting.
-            this._lastKey = null;
-          }
-        }).catch(() => { this._coverUploading.delete(trackKey); });
-      } catch (e) {
-        this._coverUploading.delete(trackKey);
-      }
-    }
-    return cached ? cached.url : null;
+    return null;
   }
 
   _platformKey(source) {

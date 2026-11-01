@@ -1,4 +1,5 @@
 const { clipboard, nativeImage } = require('electron');
+const { cheapImageSignature, imageChanged } = require('./lib/clipboardFingerprint.cjs');
 
 const POLL_INTERVAL = 800;
 const MAX_HISTORY = 50;
@@ -7,7 +8,7 @@ class ClipboardManager {
   constructor() {
     this.lastText = '';
     this.lastFormats = [];
-    this.lastImageHash = null;
+    this.lastImageSignature = null;
     this.pollTimer = null;
     this.callback = null;
     this.history = []; // [{ id, type, text?, imageDataUrl?, preview, timestamp }]
@@ -45,15 +46,10 @@ class ClipboardManager {
       if (isImage) {
         try {
           const img = clipboard.readImage();
-          if (!img.isEmpty()) {
-            const hash = img.toBitmap().length + ':' + img.getSize().width + 'x' + img.getSize().height;
-            // Cheap fingerprint: size + dimensions. Good enough to detect most
-            // new images without hashing the whole buffer every 500ms.
-            const fullHash = require('crypto').createHash('md5').update(img.toBitmap()).digest('hex');
-            if (fullHash !== this.lastImageHash) {
-              this.lastImageHash = fullHash;
-              changed = true;
-            }
+          const sig = cheapImageSignature(img);
+          if (imageChanged(sig, this.lastImageSignature)) {
+            this.lastImageSignature = sig;
+            changed = true;
           }
         } catch (e) {}
       }

@@ -8,6 +8,7 @@
 const { session, app } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { isPartialDownload, fileSignature, classifyDownloadObservation } = require('./lib/downloadSnapshot.cjs');
 
 class DownloadManager {
   constructor(monitorManager) {
@@ -48,22 +49,22 @@ class DownloadManager {
       fs.readdir(dir, (err, names) => {
         if (err) return;
         for (const filename of names) {
-          if (/\.(crdownload|part|tmp|download)$/i.test(filename)) continue;
+          if (isPartialDownload(filename)) continue;
           const full = path.join(dir, filename);
           fs.stat(full, (e2, stat) => {
             if (e2 || !stat.isFile()) return;
-            const sig = `${stat.size}:${Math.round(stat.mtimeMs)}`;
+            const sig = fileSignature(stat);
             const prev = this._seen.get(filename);
-            // On the first pass just record existing files so we do not spam a
-            // banner for every old file already in Downloads.
-            if (this._seedSnapshot) {
-              this._seen.set(filename, sig);
-              return;
-            }
-            if (prev === sig) return;
+            const verdict = classifyDownloadObservation({
+              signature: sig,
+              previous: prev,
+              seeding: this._seedSnapshot,
+              now: Date.now(),
+              mtimeMs: stat.mtimeMs,
+            });
+            if (verdict === 'seed') { this._seen.set(filename, sig); return; }
+            if (verdict === 'ignore') { if (prev !== sig) this._seen.set(filename, sig); return; }
             this._seen.set(filename, sig);
-            // Announce only files touched in the last ~20s.
-            if (Date.now() - stat.mtimeMs > 20000) return;
             const entry = {
               id: `fs_${filename}`,
               filename,

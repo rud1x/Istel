@@ -297,7 +297,8 @@ class MonitorManager {
     win.setAlwaysOnTop(true, 'floating');
     // NOTE: deliberately NOT using visibleOnFullScreen — it forces the island
     // above exclusive-fullscreen games, so hide() cannot get it out of the way.
-    win.setVisibleOnAllWorkspaces(true);
+    // Pass it explicitly so a future Electron default cannot re-enable it (R15).
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
 
     loadContent();
 

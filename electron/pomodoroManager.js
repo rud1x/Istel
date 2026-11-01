@@ -62,10 +62,17 @@ class PomodoroManager {
     }
   }
 
+  // Stop the tick loop AND freeze the session clock. Leaving `running` true
+  // with a stale `startedAt` made a resumed timer jump forward by the real
+  // elapsed time (B12).
   stop() {
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
+    }
+    if (this.running && !this.paused) {
+      this.pausedRemainingMs = this.remainingMs();
+      this.paused = true;
     }
   }
 

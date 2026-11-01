@@ -199,6 +199,7 @@ class FullscreenManager {
 
   _applyHidden(next) {
     let changed = false;
+    const wasHidden = this.hiddenDisplays.size > 0;
     for (const id of this.hiddenDisplays) {
       if (!next.has(id)) {
         this.monitorManager.setDisplayHidden?.(id, false);
@@ -225,12 +226,17 @@ class FullscreenManager {
     }
     this.hiddenDisplays = next;
 
+    const hidden = next.size > 0;
     // Tell the renderer so it can play a smooth "suck into the notch" animation
     // before the window is actually hidden.
     if (changed) {
-      const hidden = next.size > 0;
       this.monitorManager.broadcastToAll?.('island-fullscreen', { hidden });
-      // Freeze/resume all background polling so a game is never disturbed.
+    }
+    // Freeze/resume background polling on EVERY real transition. The old code
+    // only fired when the hidden SET changed, so a suspended state could get
+    // stuck if the set was already empty (B3) — the island then stopped
+    // receiving media updates until a restart.
+    if (hidden !== wasHidden) {
       try { this.onHiddenChange?.(hidden); } catch (e) {
         console.log('[Fullscreen] onHiddenChange failed:', e.message);
       }

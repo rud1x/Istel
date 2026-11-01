@@ -282,8 +282,8 @@ function DynamicIsland({
   // Слушаем обновления активного окна
   useEffect(() => {
     const handler = (processName) => setActiveApp(processName);
-    window.electronAPI?.onActiveWindowUpdate?.(handler);
-    return () => window.electronAPI?.removeActiveWindowListener?.();
+    const unsubscribe = window.electronAPI?.onActiveWindowUpdate?.(handler);
+    return () => { unsubscribe?.(); };
   }, []);
 
   // Обновление часов каждую секунду (пауза в полноэкранном режиме)

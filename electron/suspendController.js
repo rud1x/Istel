@@ -5,58 +5,57 @@
 // kill its sound), no media/clipboard/system polling, no CPU churn.
 // This controller stops every manager except the fullscreen detector,
 // and restarts them when the game is gone.
+//
+// The transition logic lives in lib/pollingLifecycle.mjs and is unit
+// tested. This file only adapts the managers to that pure state machine.
 // ============================================================
+
+const { createSuspendState, applySuspendState } = require('./lib/pollingLifecycle.cjs');
 
 class SuspendController {
   constructor() {
-    this.suspended = false;
-    // Each entry: { name, manager, started } where started(manager) restarts.
-    this.entries = [];
+    this._state = createSuspendState([]);
+    this._ops = {
+      stopManager: (manager) => {
+        if (typeof manager.stop === 'function') manager.stop();
+        else if (typeof manager.stopPolling === 'function') manager.stopPolling();
+      },
+      startManager: (manager, startFn) => {
+        if (typeof startFn === 'function') startFn(manager);
+        else if (typeof manager.start === 'function') manager.start(() => {});
+      },
+      log: (msg) => console.log(msg),
+    };
+  }
+
+  get suspended() {
+    return this._state.suspended;
   }
 
   /**
    * Register a manager that should be paused during fullscreen.
    * @param {string} name
-   * @param {object} manager  must expose stop() and (optionally) start()
+   * @param {object} manager  must expose stop()/stopPolling() and start()
    * @param {function} [startFn] custom restart (defaults to manager.start())
    */
   register(name, manager, startFn) {
     if (!manager) return;
-    this.entries.push({
+    this._state.entries.push({
       name,
       manager,
-      startFn: typeof startFn === 'function' ? startFn : () => manager.start?.(() => {}),
+      startFn: typeof startFn === 'function' ? startFn : null,
       wasRunning: false,
     });
   }
 
   suspend() {
-    if (this.suspended) return;
-    this.suspended = true;
-    for (const entry of this.entries) {
-      try {
-        entry.wasRunning = true;
-        if (typeof entry.manager.stop === 'function') entry.manager.stop();
-        else if (typeof entry.manager.stopPolling === 'function') entry.manager.stopPolling();
-      } catch (e) {
-        console.log(`[Suspend] ${entry.name} stop failed:`, e.message);
-      }
-    }
-    console.log('[Suspend] All managers paused for fullscreen.');
+    const changed = applySuspendState(this._state, true, this._ops);
+    if (changed) console.log('[Suspend] All managers paused for fullscreen.');
   }
 
   resume() {
-    if (!this.suspended) return;
-    this.suspended = false;
-    for (const entry of this.entries) {
-      if (!entry.wasRunning) continue;
-      try {
-        entry.startFn(entry.manager);
-      } catch (e) {
-        console.log(`[Suspend] ${entry.name} start failed:`, e.message);
-      }
-    }
-    console.log('[Suspend] All managers resumed.');
+    const changed = applySuspendState(this._state, false, this._ops);
+    if (changed) console.log('[Suspend] All managers resumed.');
   }
 
   setSuspended(hidden) {

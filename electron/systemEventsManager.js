@@ -34,7 +34,10 @@ class SystemEventsManager {
   }
 
   stop() {
-    if (this.interval) clearInterval(this.interval);
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
   }
 
   checkEvents() {

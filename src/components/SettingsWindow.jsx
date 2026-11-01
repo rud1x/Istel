@@ -1108,14 +1108,14 @@ function SettingsWindow() {
                 type="button"
                 className="st-btn st-btn--accent"
                 style={{ width: '100%', height: '28px', fontSize: '11px' }}
-                onClick={() => window.electronAPI?.openPath?.(updateInfo.url)}
+                onClick={() => window.electronAPI?.openExternal?.(updateInfo.url || 'https://github.com/rud1x/Istel/releases/latest')}
               >
                 Скачать
               </button>
             </div>
           )}
           <div className="st-sidebar__footer">
-            <span className="st-sidebar__version">v1.0.0</span>
+            <span className="st-sidebar__version">v{updateInfo?.current || '1.0.1'}</span>
             <button type="button" className="st-linkbtn" onClick={() => setConfirmReset(true)}>
               Сбросить всё
             </button>

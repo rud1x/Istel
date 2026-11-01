@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   forceMediaUpdate: () => ipcRenderer.invoke('force-media-update'),
   openSettings: () => ipcRenderer.invoke('open-settings'),
   openPath: (path) => ipcRenderer.invoke('open-path', path),
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
   shelfSave: (items) => ipcRenderer.invoke('shelf-save', items),
   shelfLoad: () => ipcRenderer.invoke('shelf-load'),
   shelfThumbnail: (path) => ipcRenderer.invoke('shelf-thumbnail', path),
@@ -187,9 +188,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onActiveWindowUpdate: (callback) => {
     const handler = (_event, processName) => callback(processName);
     ipcRenderer.on('active-window-update', handler);
+    // Return the per-listener unsubscribe (R14). The old
+    // removeActiveWindowListener() used removeAllListeners and would rip out
+    // every subscriber; callers should use this returned function instead.
     return () => ipcRenderer.removeListener('active-window-update', handler);
-  },
-  removeActiveWindowListener: () => {
-    ipcRenderer.removeAllListeners('active-window-update');
   },
 });

@@ -86,6 +86,7 @@ class CalendarManager {
     }
   }
 
+
   getEvents() {
     return this.events;
   }
