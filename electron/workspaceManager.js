@@ -1,18 +1,16 @@
-const { execFile } = require('child_process');
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
+// ============================================================
+// Workspace Manager
+// Broadcasts the process name of the foreground window.
+// Runs in the persistent 'system' PowerShell host (psHost.js); the C#
+// helper is compiled once instead of on every 2 s poll.
+// ============================================================
 
-// The previous version built an inline PowerShell command and collapsed
-// newlines with replace(/\n/g, ' '). That destroys here-strings (@" ... "@),
-// which REQUIRE a newline right after @" and before "@ — so the script was a
-// syntax error and active-window tracking never worked (R8). We now write a
-// proper .ps1 file and call it with -File, matching the other managers.
-const SCRIPT_DIR = path.join(os.tmpdir(), 'island_scripts');
-const SCRIPT_PATH = path.join(SCRIPT_DIR, 'active_window_query.ps1');
+const { getHost } = require('./psHost');
+const { createGuardedPoller } = require('./lib/guardedPoller.cjs');
 
-const SCRIPT_CONTENT = `
-$ErrorActionPreference = 'SilentlyContinue'
+const POLL_INTERVAL = 2000;
+
+const WORKSPACE_DEFS = `
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -21,60 +19,41 @@ public class IslandWin32 {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 }
 "@
-$hwnd = [IslandWin32]::GetForegroundWindow()
-$procId = 0
-[IslandWin32]::GetWindowThreadProcessId($hwnd, [ref]$procId) | Out-Null
-$process = Get-Process -Id $procId -ErrorAction SilentlyContinue
-if ($process) { Write-Output $process.ProcessName }
-`;
-
-function ensureScript() {
-  if (!fs.existsSync(SCRIPT_DIR)) {
-    fs.mkdirSync(SCRIPT_DIR, { recursive: true });
-  }
-  fs.writeFileSync(SCRIPT_PATH, SCRIPT_CONTENT, 'utf8');
+Function IslandActiveProcess {
+  $hwnd = [IslandWin32]::GetForegroundWindow()
+  $procId = 0
+  [IslandWin32]::GetWindowThreadProcessId($hwnd, [ref]$procId) | Out-Null
+  $process = Get-Process -Id $procId -ErrorAction SilentlyContinue
+  if ($process) { $process.ProcessName }
 }
+`;
 
 class WorkspaceManager {
   constructor(monitorManager) {
     this.monitorManager = monitorManager;
-    this.interval = null;
     this.lastProcess = null;
-    this._checking = false;
-    ensureScript();
+    this._host = getHost('system');
+    this._host.define('workspace', WORKSPACE_DEFS);
+    this._poller = createGuardedPoller(() => this.checkActiveWindow(), POLL_INTERVAL);
   }
 
   start() {
-    // Idempotent (R2/R4): never create a second timer if one is running.
-    if (this.interval) return;
-    this.checkActiveWindow();
-    this.interval = setInterval(() => this.checkActiveWindow(), 2000);
+    // Idempotent (R2/R4): never create a second poll if one is running.
+    this._poller.start();
   }
 
   stop() {
-    if (this.interval) {
-      clearInterval(this.interval);
-      this.interval = null;
-    }
+    this._poller.stop();
   }
 
   checkActiveWindow() {
-    if (this._checking) return;
-    this._checking = true;
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT_PATH],
-      { timeout: 2500, windowsHide: true },
-      (error, stdout) => {
-        this._checking = false;
-        if (error || !stdout) return;
-        const processName = stdout.trim();
-        if (processName && processName !== this.lastProcess) {
-          this.lastProcess = processName;
-          this.monitorManager.broadcastToAll('active-window-update', processName);
-        }
+    return this._host.call('IslandActiveProcess', [], { timeout: 2500 }).then((stdout) => {
+      const processName = (stdout || '').trim();
+      if (processName && processName !== this.lastProcess) {
+        this.lastProcess = processName;
+        this.monitorManager.broadcastToAll('active-window-update', processName);
       }
-    );
+    }, () => {});
   }
 }
 
