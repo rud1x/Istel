@@ -150,6 +150,7 @@ const SETTINGS_DEFAULTS = {
   pomoDND: false,
   pomoAutoNext: true,
   discordRPC: false,
+  islandDisplay: null, // display.id the island is shown on; null = primary
 };
 
 function getAllSettings() {
@@ -291,8 +292,14 @@ function bootstrap() {
   trayManager = new TrayManager(app, monitorManager, configManager, startupManager, settingsWindow);
 
   // 5. Display change listeners
-  screen.on('display-added', () => monitorManager.rebuildWindows());
-  screen.on('display-removed', () => monitorManager.rebuildWindows());
+  screen.on('display-added', () => {
+    monitorManager.rebuildWindows();
+    settingsWindow?.broadcast('displays-changed');
+  });
+  screen.on('display-removed', () => {
+    monitorManager.rebuildWindows();
+    settingsWindow?.broadcast('displays-changed');
+  });
   screen.on('display-metrics-changed', () => monitorManager.repositionAll());
 
   // Handle minimized launch
@@ -602,6 +609,9 @@ ipcMain.handle('settings-set', (_event, key, value) => {
     if (value === false) fullscreenManager?.stop?.();
     else fullscreenManager?.start?.();
   }
+  if (key === 'islandDisplay') {
+    monitorManager?.setTargetDisplay(value);
+  }
   if (key === 'discordRPC') {
     discordManager?.setEnabled(value);
     if (value) discordManager?.update(mediaManager?.getCurrentState());
@@ -618,7 +628,18 @@ ipcMain.handle('set-weather-city', (_event, city) => {
   return true;
 });
 
-ipcMain.handle('get-display-mode', () => monitorManager?.getDisplayMode() || 'pill');
+ipcMain.handle('get-displays', () => {
+  const primaryId = screen.getPrimaryDisplay().id;
+  return screen.getAllDisplays().map((d, i) => ({
+    id: d.id,
+    label: d.label || `Монитор ${i + 1}`,
+    width: d.size.width,
+    height: d.size.height,
+    primary: d.id === primaryId,
+  }));
+});
+
+ipcMain.handle('get-display-mode',() => monitorManager?.getDisplayMode() || 'pill');
 ipcMain.handle('set-display-mode', (_event, mode) => {
   monitorManager?.setDisplayMode(mode);
   settingsWindow?.broadcast('display-mode-changed', mode);

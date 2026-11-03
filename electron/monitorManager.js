@@ -22,6 +22,28 @@ class MonitorManager {
     this.windows = new Map(); // displayId → { win, isLoaded, width, height }
     this._watchdogTimer = null;
     this.displayMode = this.configManager.get('displayMode', 'pill'); // 'pill' | 'attached'
+    // Display the island lives on (display.id). null = primary display.
+    this.targetDisplayId = this.configManager.get('islandDisplay', null);
+  }
+
+  // ----------------------------------------------------------
+  // Target display: the chosen one if connected, else primary.
+  // The saved choice is kept so the island returns when the
+  // chosen display is reconnected.
+  // ----------------------------------------------------------
+  _targetDisplay() {
+    if (this.targetDisplayId != null) {
+      const found = screen.getAllDisplays().find((d) => d.id === Number(this.targetDisplayId));
+      if (found) return found;
+    }
+    return screen.getPrimaryDisplay();
+  }
+
+  setTargetDisplay(id) {
+    const next = id == null ? null : Number(id);
+    const prevTarget = this._targetDisplay().id;
+    this.targetDisplayId = next;
+    if (this._targetDisplay().id !== prevTarget) this.rebuildWindows();
   }
 
   // ----------------------------------------------------------
@@ -43,11 +65,8 @@ class MonitorManager {
   // Create one island window for each connected display
   // ----------------------------------------------------------
   createIslandWindows() {
-    const displays = screen.getAllDisplays();
-    for (const display of displays) {
-      this._createWindowForDisplay(display);
-    }
-    // Start watchdog after all windows are created
+    this._createWindowForDisplay(this._targetDisplay());
+    // Start watchdog after the window is created
     this._startWatchdog();
   }
 
@@ -198,15 +217,24 @@ class MonitorManager {
   // ----------------------------------------------------------
   _startWatchdog() {
     this._watchdogTimer = setInterval(() => {
-      const displays = screen.getAllDisplays();
-      const displayMap = new Map(displays.map((d) => [d.id, d]));
+      const target = this._targetDisplay();
+
+      // The island is on the wrong display (e.g. the chosen display was
+      // reconnected while it sat on the primary one) — move it.
+      for (const [id] of this.windows) {
+        if (id !== target.id) {
+          console.log(`[Istel][Watchdog] Island on display ${id}, target is ${target.id}, rebuilding...`);
+          this.rebuildWindows();
+          return;
+        }
+      }
 
       // Check each tracked window
       for (const [id, entry] of this.windows) {
         const { win } = entry;
         if (win.isDestroyed()) {
           // Window is gone — try to recreate
-          const display = displayMap.get(id);
+          const display = id === target.id ? target : null;
           if (display) {
             console.log(`[Istel][Watchdog] Window for display ${id} destroyed, recreating...`);
             this.windows.delete(id);
@@ -226,12 +254,10 @@ class MonitorManager {
         }
       }
 
-      // Check if a display has no window (e.g. it was never created)
-      for (const display of displays) {
-        if (!this.windows.has(display.id)) {
-          console.log(`[Istel][Watchdog] No window for display ${display.id}, creating...`);
-          this._createWindowForDisplay(display);
-        }
+      // The target display has no window (e.g. it was never created)
+      if (!this.windows.has(target.id)) {
+        console.log(`[Istel][Watchdog] No window for display ${target.id}, creating...`);
+        this._createWindowForDisplay(target);
       }
     }, WATCHDOG_INTERVAL);
   }
@@ -402,8 +428,10 @@ class MonitorManager {
     });
 
     // Window was closed — remove from map (watchdog will recreate if display still exists)
+    // Only drop our own entry: during rebuildWindows() a new window for the
+    // same display may already be registered when this async event fires.
     win.on('closed', () => {
-      this.windows.delete(display.id);
+      if (this.windows.get(display.id)?.win === win) this.windows.delete(display.id);
     });
   }
 

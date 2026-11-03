@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Monitor,
   Palette,
@@ -44,6 +44,7 @@ import '../styles/settings.css';
 // these through settings-get-defaults, so keep this only as an offline fallback.
 const DEFAULTS_FALLBACK = {
   displayMode: 'pill',
+  islandDisplay: null,
   expandBy: 'Наведением',
   expandDelay: 110,
   openTab: 'Последнюю вкладку',
@@ -127,6 +128,7 @@ const GROUPS = {
       desc: 'Что происходит, когда курсор касается острова.',
       items: [
         { key: 'displayMode', title: 'Положение', sub: 'Пилюля парит под краем или прилипает к нему', icon: Monitor, type: 'segmented', options: [{ value: 'pill', label: 'Пилюля' }, { value: 'attached', label: 'У края' }] },
+        { key: 'islandDisplay', title: 'Монитор', sub: 'На каком экране показывать остров', icon: Monitor, type: 'display' },
         { key: 'expandBy', title: 'Раскрывать', sub: 'Наведением — без клика; кликом — только по нажатию', icon: Cursor, type: 'segmented', options: [{ value: 'Наведением', label: 'Наведением' }, { value: 'Кликом', label: 'Кликом' }] },
         { key: 'expandDelay', title: 'Задержка раскрытия', sub: 'Сколько держать курсор над островом', icon: Timer, type: 'slider', min: 0, max: 500, step: 10, suffix: ' мс' },
         { key: 'openTab', title: 'При раскрытии открывать', sub: 'Последнюю вкладку или каждый раз плеер', icon: ArrowsOutSimple, type: 'segmented', options: [{ value: 'Последнюю вкладку', label: 'Последнюю' }, { value: 'Плеер', label: 'Плеер' }] },
@@ -430,10 +432,27 @@ function Chips({ value, options, onChange, disabled }) {
   );
 }
 
+// Connected displays [{ id, label, width, height, primary }], provided by SettingsWindow.
+const DisplaysContext = createContext([]);
+
+function DisplayPicker({ value, onChange, disabled }) {
+  const displays = useContext(DisplaysContext);
+  if (!displays.length) return null;
+  const primary = displays.find((d) => d.primary) || displays[0];
+  // null or a disconnected display falls back to primary, as in the main process.
+  const active = displays.some((d) => d.id === value) ? value : primary.id;
+  const options = displays.map((d) => ({
+    value: d.id,
+    label: `${d.label} · ${d.width}×${d.height}${d.primary ? ' · основной' : ''}`,
+  }));
+  return <Segmented value={active} options={options} onChange={onChange} disabled={disabled} />;
+}
+
 function SettingRow({ item, value, onChange }) {
   const disabled = !!item.soon;
   const stacked = item.type === 'chips';
   const control = (() => {
+    if (item.type === 'display') return <DisplayPicker value={value} onChange={onChange} disabled={disabled} />;
     if (item.type === 'toggle') return <Switch value={value} onChange={onChange} disabled={disabled} />;
     if (item.type === 'segmented') return <Segmented value={value} options={item.options} onChange={onChange} disabled={disabled} />;
     if (item.type === 'slider') return <Slider value={value} item={item} onChange={onChange} disabled={disabled} />;
@@ -674,6 +693,16 @@ function SettingsWindow() {
   const [privacy, setPrivacy] = useState(true);
   const [ready, setReady] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
+  const [displays, setDisplays] = useState([]);
+
+  useEffect(() => {
+    const load = () => window.electronAPI?.getDisplays?.().then((list) => {
+      if (Array.isArray(list)) setDisplays(list);
+    });
+    load();
+    const unsub = window.electronAPI?.onDisplaysChanged?.(load);
+    return () => unsub?.();
+  }, []);
 
   useEffect(() => {
     window.electronAPI?.updateState?.().then((u) => { if (u) setUpdateInfo(u); });
@@ -1029,6 +1058,7 @@ function SettingsWindow() {
   };
 
   return (
+    <DisplaysContext.Provider value={displays}>
     <div className="st-app" style={{ '--accent': uiAccent }}>
       <div className="st-titlebar">
         <span className="st-titlebar__mark" />
@@ -1239,6 +1269,7 @@ function SettingsWindow() {
         </div>
       )}
     </div>
+    </DisplaysContext.Provider>
   );
 }
 

@@ -167,6 +167,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('display-mode-changed', handler);
   },
 
+  getDisplays: () => ipcRenderer.invoke('get-displays'),
+  onDisplaysChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('displays-changed', handler);
+    return () => ipcRenderer.removeListener('displays-changed', handler);
+  },
+
   // ---- Clipboard ----
   onClipboardUpdate: (callback) => {
     const handler = (_event, data) => callback(data);
