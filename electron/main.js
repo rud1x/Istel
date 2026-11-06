@@ -26,6 +26,7 @@ const SuspendController = require('./suspendController');
 const PomodoroManager = require('./pomodoroManager');
 const DiscordManager = require('./discordManager');
 const UpdateManager = require('./updateManager');
+const psHost = require('./psHost');
 
 // ------------------------------------------------------------------
 // Process model tuning (before app.whenReady).
@@ -85,6 +86,8 @@ function startDiscordOnlyPolling() {
   if (!discordManager || !mediaManager) return;
   if (discordOnlyPollTimer) return;
   const tick = () => {
+    // Nothing to feed when Rich Presence is off — skip the SMTC query.
+    if (!configManager?.get('discordRPC', false)) return;
     // forceUpdate() queries SMTC without starting/stopping the audio endpoint
     // poll, and routes through the same Discord update path.
     mediaManager.forceUpdate()
@@ -185,7 +188,13 @@ function bootstrap() {
   // restart polling with THIS callback, otherwise the Discord pipeline is
   // silently dropped after the first fullscreen suspend (B1).
   const onMediaState = (mediaState) => {
-    monitorManager.broadcastToAll('media-update', mediaState);
+    // The artwork (tens to hundreds of KB of base64) only crosses IPC when it
+    // changed; the renderer keeps its cached copy otherwise. Discord and
+    // getMediaState() still see the full state.
+    const forRenderer = mediaState && mediaState.artworkUnchanged
+      ? { ...mediaState, artwork: undefined }
+      : mediaState;
+    monitorManager.broadcastToAll('media-update', forRenderer);
     lyricsManager.update(mediaState);
     discordManager?.update(mediaState);
   };
@@ -258,8 +267,9 @@ function bootstrap() {
   // We cannot reuse mediaManager (its SMTC poll touches the audio endpoint and
   // is suspended so a game keeps exclusive audio), so we run a SEPARATE, light
   // poller that only feeds Discord. It is not registered with SuspendController
-  // and is started/stopped by the fullscreen transition itself.
-  startDiscordOnlyPolling();
+  // and is started/stopped by the fullscreen transition itself (see
+  // onHiddenChange below). It used to also be started here unconditionally,
+  // which ran a second, duplicate SMTC poll the whole time the app was open.
   suspendController.register('volume', volumeManager);
   suspendController.register('systemInfo', systemInfoManager);
   suspendController.register('clipboard', clipboardManager, () => clipboardManager.startPolling((clipboardState) => {
@@ -667,4 +677,10 @@ app.on('before-quit', () => {
   workspaceManager?.stop();
   systemEventsManager?.stop();
   notificationManager?.stop();
+  volumeManager?.stop();
+  systemInfoManager?.stop();
+  stopDiscordOnlyPolling();
+  // The hosts also exit on their own when stdin closes, but end them
+  // explicitly so no powershell.exe outlives the app.
+  psHost.disposeAll();
 });

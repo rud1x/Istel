@@ -336,7 +336,7 @@ function DynamicIsland({
   const hasMedia = mediaState && mediaState.status !== 'no_session';
   // Real system-audio FFT levels (null when capture unavailable). Declared
   // after isPlaying to avoid a temporal-dead-zone error.
-  const audioLevels = useAudioSpectrum(!!isPlaying && !fullscreenHidden, 5);
+  const audioSpectrum = useAudioSpectrum(!!isPlaying && !fullscreenHidden, 5);
   const beatPulseActive =
     !isExpanded &&
     isPlaying &&
@@ -836,7 +836,7 @@ function DynamicIsland({
 
           <div className="music-pill-wave">
             {isPlaying ? (
-              <SoundWave color={effectiveAccent} size="large" power={settings.wavePower} clock={collapsedPos} levels={audioLevels} />
+              <SoundWave color={effectiveAccent} size="large" power={settings.wavePower} clock={collapsedPos} spectrum={audioSpectrum} />
             ) : (
               <motion.div
                 className="island-idle-dot"

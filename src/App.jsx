@@ -97,19 +97,14 @@ function IslandApp() {
   const handleMediaUpdate = useCallback((state) => {
     if (!state) return;
 
-    // Main process keeps the real base64 on the state and flags repeats via
-    // `artworkUnchanged`; the legacy '__same__' sentinel is still honored in
-    // case an older main build is paired with this renderer.
-    if (state.artwork === '__same__' || state.artworkUnchanged) {
-      if (!state.artwork || state.artwork === '__same__' || state.artwork.length < 10) {
-        state.artwork = cachedArtworkRef.current;
-      }
-    } else if (state.artwork && state.artwork.length > 10) {
+    // Main only sends the artwork when it changed (`artworkUnchanged` updates
+    // arrive without it). Any real artwork refreshes the cache; a missing
+    // one (or the legacy '__same__' sentinel) is filled from the cache.
+    const hasArtwork = typeof state.artwork === 'string' && state.artwork.length > 10 && state.artwork !== '__same__';
+    if (hasArtwork) {
       cachedArtworkRef.current = state.artwork;
-    } else if (!state.artwork || state.artwork.length < 10) {
-      if (cachedArtworkRef.current) {
-        state.artwork = cachedArtworkRef.current;
-      }
+    } else if (cachedArtworkRef.current) {
+      state.artwork = cachedArtworkRef.current;
     }
 
     setMediaState({ ...state });
