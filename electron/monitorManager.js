@@ -285,12 +285,10 @@ class MonitorManager {
         }
       }
 
-      // Check if a display has no window (e.g. it was never created)
-      for (const display of displays) {
-        if (!this.windows.has(display.id)) {
-          console.log(`[Istel][Watchdog] No window for display ${display.id}, creating...`);
-          this._createWindowForDisplay(display);
-        }
+      // Check if the target display has no window (e.g. it was never created)
+      if (!this.windows.has(target.id)) {
+        console.log(`[Istel][Watchdog] No window for display ${target.id}, creating...`);
+        this._createWindowForDisplay(target);
       }
     }, WATCHDOG_INTERVAL);
   }
