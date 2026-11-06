@@ -22,28 +22,7 @@ class MonitorManager {
     this.windows = new Map(); // displayId → { win, isLoaded, width, height }
     this._watchdogTimer = null;
     this.displayMode = this.configManager.get('displayMode', 'pill'); // 'pill' | 'attached'
-    // Display the island lives on (display.id). null = primary display.
     this.targetDisplayId = this.configManager.get('islandDisplay', null);
-  }
-
-  // ----------------------------------------------------------
-  // Target display: the chosen one if connected, else primary.
-  // The saved choice is kept so the island returns when the
-  // chosen display is reconnected.
-  // ----------------------------------------------------------
-  _targetDisplay() {
-    if (this.targetDisplayId != null) {
-      const found = screen.getAllDisplays().find((d) => d.id === Number(this.targetDisplayId));
-      if (found) return found;
-    }
-    return screen.getPrimaryDisplay();
-  }
-
-  setTargetDisplay(id) {
-    const next = id == null ? null : Number(id);
-    const prevTarget = this._targetDisplay().id;
-    this.targetDisplayId = next;
-    if (this._targetDisplay().id !== prevTarget) this.rebuildWindows();
   }
 
   // ----------------------------------------------------------
@@ -61,12 +40,27 @@ class MonitorManager {
     this.broadcastToAll('display-mode-changed', mode);
   }
 
+  _targetDisplay() {
+    if (this.targetDisplayId != null) {
+      const found = screen.getAllDisplays().find((d) => d.id === Number(this.targetDisplayId));
+      if (found) return found;
+    }
+    return screen.getPrimaryDisplay();
+  }
+
+  setTargetDisplay(id) {
+    const next = id == null ? null : Number(id);
+    const prevTarget = this._targetDisplay().id;
+    this.targetDisplayId = next;
+    if (this._targetDisplay().id !== prevTarget) this.rebuildWindows();
+  }
+
   // ----------------------------------------------------------
-  // Create one island window for each connected display
+  // Create one island window for the target display
   // ----------------------------------------------------------
   createIslandWindows() {
     this._createWindowForDisplay(this._targetDisplay());
-    // Start watchdog after the window is created
+    // Start watchdog after all windows are created
     this._startWatchdog();
   }
 
@@ -158,6 +152,38 @@ class MonitorManager {
   }
 
   // ----------------------------------------------------------
+  // Slide one display's window vertically (auto-hide). Animates like
+  // setWindowSize so the island glides instead of jumping.
+  // ----------------------------------------------------------
+  slideTo(displayId, targetY) {
+    const entry = this.windows.get(displayId);
+    if (!entry || entry.win.isDestroyed()) return;
+    if (entry._slideTargetY === targetY) return;
+    entry._slideTargetY = targetY;
+    const win = entry.win;
+    if (entry._slideAnim) clearInterval(entry._slideAnim);
+    const startY = win.getBounds().y;
+    if (startY === targetY) return;
+    const STEPS = 8;
+    let step = 0;
+    entry._slideAnim = setInterval(() => {
+      if (win.isDestroyed()) { clearInterval(entry._slideAnim); entry._slideAnim = null; return; }
+      step += 1;
+      const t = Math.min(1, step / STEPS);
+      const ease = 1 - Math.pow(1 - t, 3);
+      const y = Math.round(startY + (targetY - startY) * ease);
+      const b = win.getBounds();
+      entry._resizingUntil = Date.now() + 250;
+      win.setBounds({ x: b.x, y, width: b.width, height: b.height });
+      if (t >= 1) {
+        clearInterval(entry._slideAnim);
+        entry._slideAnim = null;
+        entry._restY = targetY > startY ? targetY : entry._restY;
+      }
+    }, 16);
+  }
+
+  // ----------------------------------------------------------
   // Broadcast an IPC message to all island windows
   // ----------------------------------------------------------
   broadcastToAll(channel, data) {
@@ -205,8 +231,11 @@ class MonitorManager {
       }
     } else {
       // Fullscreen ended: always cancel any pending hide and make sure the
-      // window is visible again.
+      // window is visible again. Restore always-on-top so the island sits
+      // above the taskbar as the user expects.
       clearTimeout(entry._hideTimer);
+      try { entry.win.setAlwaysOnTop(true, 'screen-saver'); } catch {}
+      try { entry.win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false }); } catch {}
       if (!entry.win.isVisible() && !entry._trayHidden) entry.win.show();
     }
   }
@@ -244,6 +273,8 @@ class MonitorManager {
           // Window exists but is hidden — show it (unless hidden by fullscreen
           // or manually via the tray, both of which are intentional).
           console.log(`[Istel][Watchdog] Window for display ${id} hidden, showing...`);
+          try { win.setAlwaysOnTop(true, 'screen-saver'); } catch {}
+          try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false }); } catch {}
           win.show();
         }
         // Self-heal a window that never finished loading (blank/stuck renderer).
@@ -254,10 +285,12 @@ class MonitorManager {
         }
       }
 
-      // The target display has no window (e.g. it was never created)
-      if (!this.windows.has(target.id)) {
-        console.log(`[Istel][Watchdog] No window for display ${target.id}, creating...`);
-        this._createWindowForDisplay(target);
+      // Check if a display has no window (e.g. it was never created)
+      for (const display of displays) {
+        if (!this.windows.has(display.id)) {
+          console.log(`[Istel][Watchdog] No window for display ${display.id}, creating...`);
+          this._createWindowForDisplay(display);
+        }
       }
     }, WATCHDOG_INTERVAL);
   }
@@ -320,7 +353,10 @@ class MonitorManager {
       }
     };
 
-    win.setAlwaysOnTop(true, 'floating');
+    // 'screen-saver' is higher than the Windows taskbar, so the island stays
+    // visible above normal windows AND the taskbar. Fullscreen apps are still
+    // handled separately by FullscreenManager (the island hides there).
+    win.setAlwaysOnTop(true, 'screen-saver');
     // NOTE: deliberately NOT using visibleOnFullScreen — it forces the island
     // above exclusive-fullscreen games, so hide() cannot get it out of the way.
     // Pass it explicitly so a future Electron default cannot re-enable it (R15).
@@ -428,9 +464,9 @@ class MonitorManager {
     });
 
     // Window was closed — remove from map (watchdog will recreate if display still exists)
-    // Only drop our own entry: during rebuildWindows() a new window for the
-    // same display may already be registered when this async event fires.
     win.on('closed', () => {
+      // Only drop our own entry: during rebuildWindows() a new window for the
+      // same display may already be registered when this async event fires.
       if (this.windows.get(display.id)?.win === win) this.windows.delete(display.id);
     });
   }

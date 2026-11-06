@@ -39,6 +39,8 @@ function ShelfThumb({ item }) {
 }
 
 function ShelfWidget({ items, setItems }) {
+  const safeItems = Array.isArray(items) ? items : [];
+
   const handleDragOver = (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -83,7 +85,7 @@ function ShelfWidget({ items, setItems }) {
         <span>Клик — открыть · тащите в любое окно · ПКМ — меню</span>
       </div>
 
-      {items.length === 0 ? (
+      {safeItems.length === 0 ? (
         <div style={{
           flex: 1,
           border: '1px dashed rgba(255,255,255,0.15)',
@@ -106,7 +108,7 @@ function ShelfWidget({ items, setItems }) {
           overflowY: 'auto',
           padding: '4px',
         }}>
-          {items.map((item, i) => (
+          {safeItems.map((item, i) => (
             <div
               key={i}
               onClick={() => handleOpen(item)}

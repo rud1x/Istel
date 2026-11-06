@@ -1,156 +1,227 @@
 // ============================================================
-// Media Manager — SMTC Integration (v4)
+// Media Manager — SMTC Integration (v3)
 // Uses GlobalSystemMediaTransportControlsSessionManager to
 // detect ALL active media sessions, prioritize playing ones,
 // extract artwork, and support seek + all playback controls.
-//
-// Runs inside the persistent 'media' PowerShell host (psHost.js):
-// WinRT is loaded once instead of on every poll, polls never overlap,
-// and the album artwork is read only when the track changes.
 // ============================================================
 
-const { getHost } = require('./psHost');
-const { createGuardedPoller } = require('./lib/guardedPoller.cjs');
+const { execFile } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+const { restartPolling } = require('./lib/pollingLifecycle.cjs');
+const { safeWriteFileSync } = require('./lib/safeWrite.cjs');
 
-// 1 s is enough: the renderer extrapolates the playback position between
-// updates (MusicWidget / DynamicIsland anchor + wall clock).
-const POLL_INTERVAL = 1000;
-const QUERY_TIMEOUT = 5000;
-const COMMAND_TIMEOUT = 8000;
-// A player often publishes the title before the thumbnail; retry an empty
-// artwork a few times for the same track before giving up.
-const ARTWORK_RETRIES = 5;
+// Polling intervals
+const POLL_INTERVAL = 500;        // 500ms for live seekbar updates
+
+// Write the PowerShell script to a temp file for reliable execution
+// (inline scripts with backticks and special chars often break)
+const PS_SCRIPT_DIR = path.join(require('os').tmpdir(), 'dynamic_island_scripts');
+
+function ensureScriptDir() {
+  if (!fs.existsSync(PS_SCRIPT_DIR)) {
+    fs.mkdirSync(PS_SCRIPT_DIR, { recursive: true });
+  }
+}
 
 // =================================================================
-// PowerShell definitions, loaded once per host process
+// PowerShell script: query all SMTC sessions, pick the best one
 // =================================================================
-const MEDIA_DEFS = `
+const QUERY_SCRIPT_CONTENT = `
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$script:IslandAsTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
-  Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1' })[0]
-$script:IslandAsStreamForRead = ([System.IO.WindowsRuntimeStreamExtensions].GetMethods() |
-  Where-Object { $_.Name -eq 'AsStreamForRead' -and $_.GetParameters().Count -eq 1 })[0]
 
-Function IslandAwait($WinRtTask, $ResultType) {
-  $asTask = $script:IslandAsTask.MakeGenericMethod($ResultType)
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
+  Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1' })[0]
+
+Function Await($WinRtTask, $ResultType) {
+  $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
   $netTask = $asTask.Invoke($null, @($WinRtTask))
   $netTask.Wait(-1) | Out-Null
   $netTask.Result
 }
 
 [void][Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]
-$script:IslandSmtcType = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]
-$script:IslandPropsType = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties]
 
-Function IslandSmtcSessions {
-  $mgr = IslandAwait ($script:IslandSmtcType::RequestAsync()) ($script:IslandSmtcType)
-  $mgr.GetSessions()
+$mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+$sessions = $mgr.GetSessions()
+
+if ($sessions.Count -eq 0) {
+  Write-Output '{"status":"no_session"}'
+  exit
 }
 
-# Score sessions: Playing=3, Paused=2, else=1. Ties keep the OS order
-# (first in list = most recently active).
-Function IslandBestSession($sessions, [bool]$requireTitle) {
-  $best = $null; $bestScore = 0
-  foreach ($s in $sessions) {
-    if ($requireTitle) {
-      $info = IslandAwait ($s.TryGetMediaPropertiesAsync()) ($script:IslandPropsType)
-      if ([string]::IsNullOrEmpty($info.Title)) { continue } # skip empty/dummy sessions
-    }
-    $st = [string]$s.GetPlaybackInfo().PlaybackStatus
-    $score = 1
-    if ($st -eq 'Playing') { $score = 3 } elseif ($st -eq 'Paused') { $score = 2 }
-    if ($score -gt $bestScore) { $bestScore = $score; $best = $s }
+# Score sessions: Playing=3, Paused=2, else=1
+# Break ties with the OS-provided list order (first in list = most recently active)
+$best = $null
+$bestScore = 0
+foreach ($s in $sessions) {
+  # Get properties to check if metadata is valid
+  $info = Await ($s.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+  if ([string]::IsNullOrEmpty($info.Title)) { continue } # Skip empty/dummy sessions
+
+  $pb = $s.GetPlaybackInfo()
+  $score = 1
+  $st = [string]$pb.PlaybackStatus
+  if ($st -eq 'Playing') { $score = 3 }
+  elseif ($st -eq 'Paused') { $score = 2 }
+
+  if ($score -gt $bestScore) {
+    $bestScore = $score; $best = $s
   }
-  $best
 }
 
-Function IslandB64([string]$s) {
-  [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($s))
+if ($null -eq $best) {
+  Write-Output '{"status":"no_session"}'
+  exit
 }
 
-Function IslandMediaQuery([bool]$IncludeArtwork) {
-  $sessions = @(IslandSmtcSessions)
-  if ($sessions.Count -eq 0) { return '{"status":"no_session"}' }
-  $best = IslandBestSession $sessions $true
-  if ($null -eq $best) { return '{"status":"no_session"}' }
+$info = Await ($best.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+$playback = $best.GetPlaybackInfo()
+$timeline = $best.GetTimelineProperties()
 
-  $info = IslandAwait ($best.TryGetMediaPropertiesAsync()) ($script:IslandPropsType)
-  $playback = $best.GetPlaybackInfo()
-  $timeline = $best.GetTimelineProperties()
+# Extract album artwork as base64
+$b64 = ""
+if ($null -ne $info.Thumbnail) {
+  try {
+    $asStreamForReadMethod = ([System.IO.WindowsRuntimeStreamExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsStreamForRead' -and $_.GetParameters().Count -eq 1 })[0]
+    $stream = Await ($info.Thumbnail.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
 
-  $b64 = ''
-  if ($IncludeArtwork -and $null -ne $info.Thumbnail -and $null -ne $script:IslandAsStreamForRead) {
-    try {
-      $stream = IslandAwait ($info.Thumbnail.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
-      if ($null -ne $stream) {
-        $netStream = $script:IslandAsStreamForRead.Invoke($null, @($stream))
-        $ms = New-Object System.IO.MemoryStream
-        try {
-          $netStream.CopyTo($ms)
-          $bytes = $ms.ToArray()
-          if ($bytes.Length -gt 0) { $b64 = [Convert]::ToBase64String($bytes) }
-        } finally {
-          $ms.Dispose(); $netStream.Dispose(); $stream.Dispose()
-        }
+    if ($null -ne $stream -and $null -ne $asStreamForReadMethod) {
+      $netStream = $asStreamForReadMethod.Invoke($null, @($stream))
+      $ms = New-Object System.IO.MemoryStream
+      $buffer = New-Object byte[] 8192
+      while (($read = $netStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        $ms.Write($buffer, 0, $read)
       }
-    } catch {}
-  }
-
-  @{
-    status         = 'active'
-    title          = IslandB64 ([string]$info.Title)
-    artist         = IslandB64 ([string]$info.Artist)
-    album          = IslandB64 ([string]$info.AlbumTitle)
-    artwork        = $b64
-    artworkFetched = [bool]$IncludeArtwork
-    playbackStatus = [string]$playback.PlaybackStatus
-    position       = [math]::Round($timeline.Position.TotalSeconds, 2)
-    lastUpdatedMs  = $timeline.LastUpdatedTime.ToUnixTimeMilliseconds()
-    duration       = [math]::Round($timeline.EndTime.TotalSeconds, 2)
-    source         = [string]$best.SourceAppUserModelId
-    sessionCount   = $sessions.Count
-  } | ConvertTo-Json -Compress
+      $bytes = $ms.ToArray()
+      if ($bytes.Length -gt 0) {
+        $b64 = [Convert]::ToBase64String($bytes)
+      }
+      $ms.Dispose()
+      $netStream.Dispose()
+    }
+  } catch {}
 }
 
-Function IslandMediaCommand([string]$Action) {
-  $best = IslandBestSession @(IslandSmtcSessions) $false
-  if ($null -eq $best) { return 'no_session' }
-  # WinRT IAsyncOperation has no GetAwaiter() in Windows PowerShell 5.1;
-  # await it through AsTask like every other call.
-  switch ($Action) {
-    'play-pause' { $op = $best.TryTogglePlayPauseAsync() }
-    'next'       { $op = $best.TrySkipNextAsync() }
-    'previous'   { $op = $best.TrySkipPreviousAsync() }
-    default      { throw "unknown media command: $Action" }
-  }
-  [string](IslandAwait $op ([bool]))
+$obj = @{
+  status         = "active"
+  title          = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$info.Title))
+  artist         = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$info.Artist))
+  album          = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$info.AlbumTitle))
+  artwork        = $b64
+  playbackStatus = [string]$playback.PlaybackStatus
+  position       = [math]::Round($timeline.Position.TotalSeconds, 2)
+  lastUpdatedMs  = $timeline.LastUpdatedTime.ToUnixTimeMilliseconds()
+  duration       = [math]::Round($timeline.EndTime.TotalSeconds, 2)
+  source         = [string]$best.SourceAppUserModelId
+  sessionCount   = $sessions.Count
 }
-
-Function IslandMediaSeek([double]$SeekPosition) {
-  $best = IslandBestSession @(IslandSmtcSessions) $false
-  if ($null -eq $best) { return 'no_session' }
-  $ticks = [long]($SeekPosition * 10000000)
-  [string](IslandAwait ($best.TryChangePlaybackPositionAsync($ticks)) ([bool]))
-}
+$obj | ConvertTo-Json -Compress
 `;
 
-const COMMANDS = new Set(['play-pause', 'next', 'previous']);
-const NO_SESSION = () => ({ status: 'no_session', title: '', artist: '' });
+// =================================================================
+// PowerShell script: send a control command to the best session
+// =================================================================
+function buildControlScriptContent(action) {
+  return `
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
+  Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1' })[0]
+Function Await($WinRtTask, $ResultType) {
+  $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+  $netTask = $asTask.Invoke($null, @($WinRtTask))
+  $netTask.Wait(-1) | Out-Null
+  $netTask.Result
+}
+[void][Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]
+$mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+$sessions = $mgr.GetSessions()
+$best = $null; $bestScore = 0
+foreach ($s in $sessions) {
+  $pb = $s.GetPlaybackInfo()
+  $score = 1; $st = [string]$pb.PlaybackStatus
+  if ($st -eq 'Playing') { $score = 3 } elseif ($st -eq 'Paused') { $score = 2 }
+  if ($score -gt $bestScore) { $bestScore = $score; $best = $s }
+}
+if ($best) {
+  ${action}
+}
+`;
+}
+
+// =================================================================
+// PowerShell script: seek to a specific position (in seconds)
+// =================================================================
+const SEEK_SCRIPT_CONTENT = `
+param([double]$SeekPosition)
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
+  Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1' })[0]
+Function Await($WinRtTask, $ResultType) {
+  $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+  $netTask = $asTask.Invoke($null, @($WinRtTask))
+  $netTask.Wait(-1) | Out-Null
+  $netTask.Result
+}
+[void][Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]
+$mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+$sessions = $mgr.GetSessions()
+$best = $null; $bestScore = 0
+foreach ($s in $sessions) {
+  $pb = $s.GetPlaybackInfo()
+  $score = 1; $st = [string]$pb.PlaybackStatus
+  if ($st -eq 'Playing') { $score = 3 } elseif ($st -eq 'Paused') { $score = 2 }
+  if ($score -gt $bestScore) { $bestScore = $score; $best = $s }
+}
+if ($best) {
+  $ticks = [long]($SeekPosition * 10000000)
+  $best.TryChangePlaybackPositionAsync($ticks).GetAwaiter().GetResult() | Out-Null
+}
+`;
 
 class MediaManager {
   constructor() {
     this.currentState = null;
-    this.callback = null;
+    this.pollTimer = null;
     this._lastStateKey = null;
     this._lastArtwork = null;
     this._debounceTimer = null;
-    // Artwork cache for the current track.
-    this._artworkKey = null;
-    this._artwork = '';
-    this._artworkTries = 0;
-    this._host = getHost('media');
-    this._host.define('media', MEDIA_DEFS);
-    this._poller = createGuardedPoller(() => this._poll(), POLL_INTERVAL);
+    this._scriptPaths = {};
+    this._initScripts();
+  }
+
+  // Write a PS script file, tolerating a file locked by another process (a
+  // leftover Electron instance, antivirus, etc.). A locked file usually means
+  // a valid script already exists, so we can keep using it instead of crashing
+  // the whole startup (EBUSY/EPERM used to abort bootstrap and hide the island).
+  // Write all PS scripts to temp files once at startup
+  _initScripts() {
+    ensureScriptDir();
+
+    // Query script
+    const queryPath = path.join(PS_SCRIPT_DIR, 'query.ps1');
+    safeWriteFileSync(queryPath, QUERY_SCRIPT_CONTENT);
+    this._scriptPaths.query = queryPath;
+
+    // Control scripts
+    const actions = {
+      'play-pause': '$best.TryTogglePlayPauseAsync().GetAwaiter().GetResult() | Out-Null',
+      'next': '$best.TrySkipNextAsync().GetAwaiter().GetResult() | Out-Null',
+      'previous': '$best.TrySkipPreviousAsync().GetAwaiter().GetResult() | Out-Null',
+    };
+
+    for (const [cmd, action] of Object.entries(actions)) {
+      const p = path.join(PS_SCRIPT_DIR, `${cmd}.ps1`);
+      safeWriteFileSync(p, buildControlScriptContent(action));
+      this._scriptPaths[cmd] = p;
+    }
+
+    // Seek script
+    const seekPath = path.join(PS_SCRIPT_DIR, 'seek.ps1');
+    safeWriteFileSync(seekPath, SEEK_SCRIPT_CONTENT);
+    this._scriptPaths.seek = seekPath;
   }
 
   // ----------------------------------------------------------
@@ -158,11 +229,54 @@ class MediaManager {
   // ----------------------------------------------------------
   startPolling(callback) {
     this.callback = callback;
-    this._poller.start();
+
+    const poll = () => {
+      this._queryMedia()
+        .then((state) => {
+          // Track changes: compare title+artist+status (not position)
+          const trackKey = `${state.title}|${state.artist}|${state.playbackStatus}`;
+
+          if (trackKey !== this._lastStateKey) {
+            // Track or status changed — debounce to avoid flicker
+            this._lastStateKey = trackKey;
+            clearTimeout(this._debounceTimer);
+            this._debounceTimer = setTimeout(() => {
+              this.currentState = state;
+              if (this.callback) this.callback(state);
+            }, 120);
+          } else {
+            // Same track — update position immediately (no debounce).
+            // Track whether the artwork changed, but keep the real base64 on
+            // the state: Discord must always receive actual bytes (the
+            // '__same__' sentinel made artwork uploads silently skip on the
+            // first tick after a track change). The renderer still gets a
+            // hint via `artworkUnchanged` so it can avoid re-decoding.
+            const artworkUnchanged = !!(state.artwork && state.artwork === this._lastArtwork);
+            if (state.artwork && !artworkUnchanged) this._lastArtwork = state.artwork;
+            state.artworkUnchanged = artworkUnchanged;
+            this.currentState = state;
+            if (this.callback) this.callback(state);
+          }
+        })
+        .catch(() => {
+          const noSession = { status: 'no_session' };
+          if (this._lastStateKey !== '__no_session__') {
+            this._lastStateKey = '__no_session__';
+            this.currentState = noSession;
+            if (this.callback) this.callback(noSession);
+          }
+        });
+    };
+
+    poll();
+    restartPolling(this, () => setInterval(poll, POLL_INTERVAL));
   }
 
   stopPolling() {
-    this._poller.stop();
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     clearTimeout(this._debounceTimer);
   }
 
@@ -170,50 +284,11 @@ class MediaManager {
     return this.currentState;
   }
 
-  async _poll() {
-    const state = await this._queryState();
-    if (state.status !== 'active') {
-      if (this._lastStateKey !== '__no_session__') {
-        this._lastStateKey = '__no_session__';
-        this.currentState = state;
-        if (this.callback) this.callback(state);
-      }
-      return;
-    }
-
-    // Track changes: compare title+artist+status (not position)
-    const trackKey = `${state.title}|${state.artist}|${state.playbackStatus}`;
-    if (trackKey !== this._lastStateKey) {
-      // Track or status changed — debounce to avoid flicker
-      this._lastStateKey = trackKey;
-      clearTimeout(this._debounceTimer);
-      this._debounceTimer = setTimeout(() => {
-        this.currentState = state;
-        if (this.callback) this.callback(state);
-      }, 120);
-      return;
-    }
-
-    // Same track — update position immediately (no debounce).
-    this._flagArtwork(state);
-    this.currentState = state;
-    if (this.callback) this.callback(state);
-  }
-
-  // The state always carries the real base64 (Discord needs actual bytes);
-  // `artworkUnchanged` tells main.js it can skip sending it to the renderer.
-  _flagArtwork(state) {
-    const artworkUnchanged = !!(state.artwork && state.artwork === this._lastArtwork);
-    if (state.artwork && !artworkUnchanged) this._lastArtwork = state.artwork;
-    state.artworkUnchanged = artworkUnchanged;
-  }
-
   // ----------------------------------------------------------
   // Force an immediate query and send the result to the renderer
   // ----------------------------------------------------------
   forceUpdate() {
-    return this._queryState().then((state) => {
-      if (state.status === 'active') this._flagArtwork(state);
+    return this._queryMedia().then((state) => {
       this.currentState = state;
       if (this.callback) this.callback(state);
       return state;
@@ -224,19 +299,28 @@ class MediaManager {
   // Send a control command (play-pause, next, previous)
   // ----------------------------------------------------------
   sendCommand(command) {
-    if (!COMMANDS.has(command)) {
+    const scriptPath = this._scriptPaths[command];
+    if (!scriptPath) {
       console.log('[MediaManager] Unknown command:', command);
       return Promise.resolve(false);
     }
-    return this._host.call('IslandMediaCommand', [command], { timeout: COMMAND_TIMEOUT })
-      .then(() => {
-        console.log(`[MediaManager] Command ${command} OK`);
-        return true;
-      })
-      .catch((err) => {
-        console.log(`[MediaManager] Command ${command} failed:`, err.message);
-        return false;
-      });
+
+    return new Promise((resolve) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+        { timeout: 8000 },
+        (err, stdout, stderr) => {
+          if (err) {
+            console.log(`[MediaManager] Command ${command} failed:`, err.message, stderr || '');
+            resolve(false);
+          } else {
+            console.log(`[MediaManager] Command ${command} OK`);
+            resolve(true);
+          }
+        }
+      );
+    });
   }
 
   // ----------------------------------------------------------
@@ -244,73 +328,68 @@ class MediaManager {
   // ----------------------------------------------------------
   seekTo(positionSeconds) {
     console.log('[MediaManager] Seek to:', positionSeconds);
-    const pos = Number(positionSeconds) || 0;
-    return this._host.call('IslandMediaSeek', [pos], { timeout: COMMAND_TIMEOUT })
-      .then(() => true)
-      .catch((err) => {
-        console.log('[MediaManager] Seek failed:', err.message);
-        return false;
-      });
+    return new Promise((resolve) => {
+      execFile(
+        'powershell.exe',
+        [
+          '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+          '-File', this._scriptPaths.seek,
+          '-SeekPosition', String(positionSeconds),
+        ],
+        { timeout: 8000 },
+        (err, stdout, stderr) => {
+          if (err) console.log('[MediaManager] Seek failed:', err.message, stderr || '');
+          resolve(!err);
+        }
+      );
+    });
   }
 
   // ----------------------------------------------------------
-  // Internal: current state with the cached artwork attached. The
-  // thumbnail is fetched only when the track changes (or is still empty).
+  // Internal: query current media session via PowerShell
   // ----------------------------------------------------------
-  async _queryState() {
-    let state = await this._queryMedia(false);
-    if (state.status !== 'active') return state;
-
-    const key = `${state.title}|${state.artist}|${state.source || ''}`;
-    if (key !== this._artworkKey) {
-      this._artworkKey = key;
-      this._artwork = '';
-      this._artworkTries = 0;
-    }
-    if (!this._artwork && this._artworkTries < ARTWORK_RETRIES) {
-      this._artworkTries += 1;
-      const full = await this._queryMedia(true);
-      if (full.status === 'active' && `${full.title}|${full.artist}|${full.source || ''}` === key) {
-        this._artwork = full.artwork || '';
-        state = full;
-      }
-    }
-    state.artwork = this._artwork;
-    delete state.artworkFetched;
-    return state;
-  }
-
-  _queryMedia(includeArtwork) {
+  _queryMedia() {
     const startedAt = Date.now();
-    return this._host.call('IslandMediaQuery', [!!includeArtwork], { timeout: QUERY_TIMEOUT })
-      .then((out) => {
-        const raw = (out || '').trim();
-        const jsonStart = raw.indexOf('{');
-        const jsonEnd = raw.lastIndexOf('}');
-        if (jsonStart === -1) return NO_SESSION();
-        const data = JSON.parse(raw.substring(jsonStart, jsonEnd + 1));
+    return new Promise((resolve) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', this._scriptPaths.query],
+        { timeout: 3000 },
+        (err, stdout) => {
+          if (err || !stdout) return resolve({ status: 'no_session', title: '', artist: '' });
+          try {
+            const raw = stdout.trim();
+            const jsonStart = raw.indexOf('{');
+            const jsonEnd = raw.lastIndexOf('}');
+            if (jsonStart === -1) return resolve({ status: 'no_session', title: '', artist: '' });
+            const data = JSON.parse(raw.substring(jsonStart, jsonEnd + 1));
 
-        // How stale is the reported position? SMTC's `Position` is a
-        // snapshot as of `LastUpdatedTime`, and players update it
-        // infrequently (or not at all). The real position is
-        //   Position + (now - LastUpdatedTime)   while playing.
-        // We forward that age so the renderer can add it.
-        const lu = Number(data.lastUpdatedMs);
-        if (Number.isFinite(lu) && lu > 1000000000000) { // sanity: > 2001
-          data.positionAgeMs = Math.max(0, Date.now() - lu);
-        } else {
-          data.positionAgeMs = Date.now() - startedAt;
-        }
+            // How stale is the reported position? SMTC's `Position` is a
+            // snapshot as of `LastUpdatedTime`, and players update it
+            // infrequently (or not at all). The real position is
+            //   Position + (now - LastUpdatedTime)   while playing.
+            // We forward that age so the renderer can add it.
+            const lu = Number(data.lastUpdatedMs);
+            if (Number.isFinite(lu) && lu > 1000000000000) { // sanity: > 2001
+              data.positionAgeMs = Math.max(0, Date.now() - lu);
+            } else {
+              data.positionAgeMs = Date.now() - startedAt;
+            }
 
-        // Decode Base64 strings to UTF-8
-        if (data.status === 'active') {
-          if (data.title) data.title = Buffer.from(data.title, 'base64').toString('utf8');
-          if (data.artist) data.artist = Buffer.from(data.artist, 'base64').toString('utf8');
-          if (data.album) data.album = Buffer.from(data.album, 'base64').toString('utf8');
+            // Decode Base64 strings to UTF-8
+            if (data.status === 'active') {
+              if (data.title) data.title = Buffer.from(data.title, 'base64').toString('utf8');
+              if (data.artist) data.artist = Buffer.from(data.artist, 'base64').toString('utf8');
+              if (data.album) data.album = Buffer.from(data.album, 'base64').toString('utf8');
+            }
+
+            resolve(data);
+          } catch (e) {
+            resolve({ status: 'no_session', title: '', artist: '' });
+          }
         }
-        return data;
-      })
-      .catch(() => NO_SESSION());
+      );
+    });
   }
 }
 

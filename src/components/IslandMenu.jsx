@@ -17,11 +17,11 @@ function IslandMenu({ activeTab, onTabChange, onOpenQr, hiddenTabs = [] }) {
       display: 'flex',
       justifyContent: 'center',
       alignItems: 'center',
-      gap: '6px',
-      padding: '6px 8px',
-      background: 'rgba(255,255,255,0.06)',
-      borderRadius: '20px',
-      marginBottom: '8px',
+      gap: '4px',
+      padding: '4px 6px',
+      background: 'rgba(255,255,255,0.05)',
+      borderRadius: '16px',
+      marginBottom: '6px',
       flexShrink: 0,
       width: '100%',
     }}>
@@ -35,13 +35,13 @@ function IslandMenu({ activeTab, onTabChange, onOpenQr, hiddenTabs = [] }) {
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: isActive ? '6px' : '0',
-              padding: isActive ? '6px 14px' : '6px 8px',
-              borderRadius: '16px',
+              gap: isActive ? '5px' : '0',
+              padding: isActive ? '5px 12px' : '5px 7px',
+              borderRadius: '12px',
               border: 'none',
-              background: isActive ? 'rgba(255,255,255,0.15)' : 'transparent',
-              color: isActive ? '#fff' : 'rgba(255,255,255,0.5)',
-              fontSize: '13px',
+              background: isActive ? 'rgba(255,255,255,0.12)' : 'transparent',
+              color: isActive ? '#fff' : 'rgba(255,255,255,0.45)',
+              fontSize: '12px',
               cursor: 'pointer',
               whiteSpace: 'nowrap',
               transition: 'all 0.2s ease',
@@ -59,7 +59,7 @@ function IslandMenu({ activeTab, onTabChange, onOpenQr, hiddenTabs = [] }) {
               }
             }}
           >
-            <Icon size={16} weight={isActive ? 'fill' : 'regular'} />
+            <Icon size={14} weight={isActive ? 'fill' : 'regular'} />
             {isActive && <span>{tab.label}</span>}
           </button>
         );

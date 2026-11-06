@@ -63,7 +63,7 @@ function IdleWidget({ currentTime, currentDate, systemInfo, pinned = [], onAdd, 
       <div
         onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
         onDrop={handleDrop}
-        style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(66px, 1fr))', gap: '8px', overflowY: 'auto', alignContent: 'start', padding: '2px', minHeight: 0 }}
+        style={{ flex: 1, display: 'flex', flexWrap: 'wrap', gap: '8px', alignContent: 'flex-start', padding: '2px', minHeight: 0, overflowY: 'hidden' }}
       >
         {pinned.map((item, i) => (
           <div
@@ -74,7 +74,7 @@ function IdleWidget({ currentTime, currentDate, systemInfo, pinned = [], onAdd, 
             style={{
               position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px',
               padding: '6px 4px', borderRadius: '10px', background: 'rgba(255,255,255,0.04)', cursor: 'pointer',
-              textAlign: 'center', transition: 'background 0.15s',
+              textAlign: 'center', transition: 'background 0.15s', width: '66px',
             }}
             onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.1)')}
             onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.04)')}
@@ -95,7 +95,7 @@ function IdleWidget({ currentTime, currentDate, systemInfo, pinned = [], onAdd, 
           style={{
             display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '4px',
             border: '1px dashed rgba(255,255,255,0.2)', borderRadius: '10px', background: 'rgba(255,255,255,0.02)',
-            color: 'rgba(255,255,255,0.6)', fontSize: '9.5px', cursor: 'pointer', minHeight: '66px', transition: 'background 0.2s',
+            color: 'rgba(255,255,255,0.6)', fontSize: '9.5px', cursor: 'pointer', minHeight: '66px', width: '66px', transition: 'background 0.2s',
           }}
           onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
           onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}

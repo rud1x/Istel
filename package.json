@@ -1,6 +1,6 @@
 {
   "name": "istel",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Istel — a sleek always-on-top island overlay for Windows with media controls, clipboard, shelf and calendar integration",
   "main": "electron/main.js",
   "scripts": {

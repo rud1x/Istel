@@ -1,4 +1,5 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { buildSearchIndex, searchIndex } from '../utils/settingsSearch.mjs';
 import {
   Monitor,
   Palette,
@@ -36,15 +37,18 @@ import {
   Rows,
   LockSimple,
   DownloadSimple,
+  Bluetooth,
+  WifiHigh,
+  Question,
   X,
 } from 'phosphor-react';
 import '../styles/settings.css';
+import ThemeCreatorModal from './ThemeCreatorModal';
 
 // Mirrors SETTINGS_DEFAULTS in electron/main.js. The main process also exposes
 // these through settings-get-defaults, so keep this only as an offline fallback.
 const DEFAULTS_FALLBACK = {
   displayMode: 'pill',
-  islandDisplay: null,
   expandBy: 'Наведением',
   expandDelay: 110,
   openTab: 'Последнюю вкладку',
@@ -60,9 +64,10 @@ const DEFAULTS_FALLBACK = {
   lightBorder: true,
   shadow: true,
   scale: 100,
+  collapsedScale: 100,
+  expandedScale: 100,
   anim: 'Капля',
   wavePower: 100,
-  cursorPull: 100,
   playerBg: 'Без фона',
   playerAnim: 'Только пульс',
   syncLyrics: true,
@@ -71,10 +76,16 @@ const DEFAULTS_FALLBACK = {
   batteryNotif: true,
   capsNotif: true,
   clipNotif: true,
+  notifProgress: true,
+  notifIcons: true,
+  notifPosition: 'bottom',
+  notifAnimation: 'slide',
+  notifAccentTint: true,
+  liveEdge: true,
+  miniIsland: false,
   hiddenTabs: [],
   expBeats: true,
   beatPower: 100,
-  expGlass: false,
   city: '',
   playerVolume: 100,
   downloadNotif: true,
@@ -118,6 +129,7 @@ const TAB_META = [
   { id: 'tabs', label: 'Вкладки', icon: SquaresFour, kicker: 'Компоновка', desc: 'Соберите меню острова под себя. Плеер остаётся всегда.' },
   { id: 'system', label: 'Система', icon: Gear, kicker: 'Система', desc: 'Автозапуск, интеграции и определение города для погоды.' },
   { id: 'experimental', label: 'Экспериментальное', icon: Flask, kicker: 'Лаборатория', desc: 'То, что уже работает, но пока не везде и не у всех.' },
+  { id: 'help', label: 'Справка', icon: Question, kicker: 'Помощь', desc: 'Как пользоваться островом и его скрытыми жестами.' },
 ];
 
 const GROUPS = {
@@ -142,6 +154,15 @@ const GROUPS = {
         { key: 'battery', title: 'Батарея или дата', sub: 'На устройстве без батареи показывается дата', icon: BatteryFull, type: 'toggle' },
         { key: 'capslock', title: 'Раскладка и Caps Lock', sub: 'Код языка рядом с часами', icon: Keyboard, type: 'toggle' },
         { key: 'pillLyric', title: 'Строка песни', sub: 'Вместо названия трека — то, что поёт сейчас', icon: TextAa, type: 'toggle' },
+      ],
+    },
+    {
+      id: 'sizes',
+      title: 'Размеры',
+      desc: 'Свёрнутая пилюля и раскрытая панель масштабируются независимо.',
+      items: [
+        { key: 'collapsedScale', title: 'Размер свёрнутого', sub: 'Остров в покое и плашки на нём: часы, музыка, уведомления', icon: Rows, type: 'slider', min: 70, max: 140, step: 5, suffix: '%' },
+        { key: 'expandedScale', title: 'Размер раскрытого', sub: 'Остров с вкладками и всё, что в нём', icon: ArrowsOutSimple, type: 'slider', min: 70, max: 140, step: 5, suffix: '%' },
       ],
     },
     {
@@ -172,21 +193,27 @@ const GROUPS = {
       desc: 'Геометрия и материал острова.',
       items: [
         { key: 'accentFollowTrack', title: 'Акцент под трек', sub: 'Когда играет музыка — цвет из обложки; в покое — ваш акцент', icon: MusicNote, type: 'toggle' },
-        { key: 'scale', title: 'Масштаб', sub: 'Размер острова и всего, что внутри', icon: ArrowsOutSimple, type: 'slider', min: 80, max: 120, step: 5 },
+
         { key: 'roundness', title: 'Скругление', sub: 'Углы раскрытого острова', icon: SquaresFour, type: 'slider', min: 0, max: 100 },
         { key: 'edgeFade', title: 'Слияние с краем', sub: 'Вогнутые «плечи» в режиме у края', icon: Moon, type: 'slider', min: 0, max: 100 },
-        { key: 'lightBorder', title: 'Светлая кромка', sub: 'Тонкий блик по верхнему краю', icon: Sun, type: 'toggle' },
-        { key: 'shadow', title: 'Тень', sub: 'Мягкая тень под островом', icon: Drop, type: 'toggle' },
+      ],
+    },
+    {
+      id: 'live',
+      title: 'Живые эффекты',
+      desc: 'Живые эффекты под музыку.',
+      pro: true,
+      items: [
+        { key: 'liveEdge', title: 'Живая кромка', sub: 'Нижний край раскрытого острова мягко колышется, под музыку — сильнее', icon: Sparkle, type: 'toggle' },
+        { key: 'wavePower', title: 'Сила волны', sub: 'Высота волн и пульсации боков под музыку', icon: Waves, type: 'slider', min: 0, max: 200 },
       ],
     },
     {
       id: 'motion',
-      title: 'Движение',
-      desc: 'Анимация раскрытия и живые эффекты под музыку.',
+      title: 'Анимация',
+      desc: 'Как остров появляется и исчезает.',
       items: [
-        { key: 'anim', title: 'Анимация раскрытия', sub: 'Характер пружины', icon: Sparkle, type: 'chips', options: ['Капля', 'Пружина', 'Плавно', 'Волна', 'Желе', 'Тянучка', 'Мяч', 'Резинка', 'Щелчок', 'Пузырь'] },
-        { key: 'wavePower', title: 'Сила волны', sub: 'Высота волн и пульсации', icon: Waves, type: 'slider', min: 0, max: 200 },
-        { key: 'cursorPull', title: 'Притяжение к курсору', sub: 'Насколько остров тянется к указателю', icon: Cursor, type: 'slider', min: 0, max: 200 },
+        { key: 'anim', title: 'Раскрытие', sub: 'Наведите на вариант — он проиграется на картинке выше', icon: Sparkle, type: 'chips', options: ['Капля', 'Пружина', 'Плавно', 'Волна', 'Желе', 'Тянучка', 'Мяч', 'Резинка', 'Щелчок', 'Пузырь'] },
       ],
     },
     {
@@ -194,7 +221,8 @@ const GROUPS = {
       title: 'Материал',
       desc: 'Дополнительные эффекты поверхности.',
       items: [
-        { key: 'expGlass', title: 'Матовое стекло', sub: 'Полупрозрачный фон с размытием', icon: Sparkle, type: 'toggle' },
+        { key: 'artworkTheme', title: 'Живой фон в цвет темы', sub: 'Медленные градиенты в раскрытом острове', icon: Palette, type: 'toggle' },
+        { key: 'copyWave', title: 'Волна при копировании', sub: 'Световая волна по острову, когда текст скопирован', icon: Waves, type: 'toggle' },
       ],
     },
   ],
@@ -204,9 +232,8 @@ const GROUPS = {
       title: 'Плеер',
       desc: 'Как выглядит раскрытый плеер.',
       items: [
-        { key: 'playerBg', title: 'Фон', sub: 'Живой фон из обложки трека', icon: Image, type: 'segmented', options: [{ value: 'Без фона', label: 'Без фона' }, { value: 'Размытая обложка', label: 'Обложка' }, { value: 'Сияние', label: 'Сияние' }] },
-        { key: 'playerAnim', title: 'Анимация музыки', sub: 'Эквалайзер рядом с названием', icon: Waves, type: 'segmented', options: [{ value: 'Только пульс', label: 'Пульс' }, { value: 'Пульс и полоски', label: 'Полоски' }, { value: 'Без анимации', label: 'Выкл' }] },
-        { key: 'playerVolume', title: 'Громкость', sub: 'Системная громкость воспроизведения', icon: SpeakerHigh, type: 'slider', min: 0, max: 100 },
+        { key: 'playerBg', title: 'Фон плеера', sub: 'Без фона — чисто; Сияние — мягкий градиент от акцента; Обложка — размытая картинка трека', icon: Image, type: 'segmented', options: [{ value: 'Без фона', label: 'Без фона' }, { value: 'Сияние', label: 'Сияние' }, { value: 'Обложка', label: 'Обложка' }] },
+        { key: 'playerAnim', title: 'Индикатор воспроизведения', sub: 'Эквалайзер рядом с названием трека', icon: Sparkle, type: 'segmented', options: [{ value: 'Без анимации', label: 'Нет' }, { value: 'Только пульс', label: 'Пульс' }, { value: 'Пульс и полоски', label: 'Полоски' }] },
       ],
     },
     {
@@ -227,16 +254,17 @@ const GROUPS = {
         { key: 'notifDuration', title: 'Время показа', sub: 'Общее для всех событий', icon: Timer, type: 'slider', min: 0.5, max: 5, step: 0.1, suffix: ' с' },
       ],
     },
+
     {
       id: 'sources',
       title: 'События',
       desc: 'Выберите, о чём остров должен сообщать.',
       items: [
-        { key: 'volumeNotif', title: 'Громкость', sub: 'Изменение системной громкости', icon: SpeakerHigh, type: 'toggle' },
+        { key: 'volumeNotif', title: 'Громкость', sub: 'Колесико над плашкой продолжает менять звук', icon: SpeakerHigh, type: 'toggle' },
         { key: 'batteryNotif', title: 'Батарея и зарядка', sub: 'Подключение питания и низкий заряд', icon: BatteryFull, type: 'toggle' },
-        { key: 'capsNotif', title: 'Caps Lock', sub: 'Включение и выключение', icon: Keyboard, type: 'toggle' },
-        { key: 'clipNotif', title: 'Копирование', sub: 'Текст, файлы и картинки в буфере', icon: Clipboard, type: 'toggle' },
-        { key: 'downloadNotif', title: 'Загрузки', sub: 'Имя файла, скорость и прогресс', icon: DownloadSimple, type: 'toggle' },
+        { key: 'capsNotif', title: 'Caps Lock', sub: 'Плашка на пару секунд при нажатии. Постоянный значок на свёрнутом острове — в «Остров»', icon: Keyboard, type: 'toggle' },
+        { key: 'clipNotif', title: 'Копирование', sub: 'Что скопировано, и что с этим сделать: QR-код, в заметки, на полку, сохранить картинку', icon: Clipboard, type: 'toggle' },
+        { key: 'downloadNotif', title: 'Загрузки', sub: 'То, что живёт на острове, пока идёт: прогресс скачивания, в конце — плашка с файлом', icon: DownloadSimple, type: 'toggle' },
       ],
     },
   ],
@@ -271,6 +299,41 @@ const GROUPS = {
       items: [
         { key: 'expBeats', title: 'Пульс под биты', sub: 'Световая волна бежит внутри острова, пока играет музыка', icon: Sparkle, type: 'toggle' },
         { key: 'beatPower', title: 'Сила пульса', sub: 'Размер и яркость бегущей волны', icon: Waves, type: 'slider', min: 0, max: 200 },
+      ],
+    },
+  ],
+  help: [
+    {
+      id: 'help-basic',
+      title: 'Основное',
+      desc: '',
+      helpItems: [
+        { title: 'Раскрыть остров', sub: 'Наведите курсор на остров вверху экрана. Уведите — он свернётся сам. Раскрытие по клику и задержка — в «Остров»' },
+        { title: 'Вкладки', sub: 'Вверху раскрытого острова. Порядок меняется: зажмите вкладку и перетащите. Лишние прячутся в разделе «Вкладки»' },
+        { title: 'Настройки', sub: 'Шестерёнка справа от вкладок или значок Island в трее (у часов Windows)' },
+        { title: 'Полноэкранные игры и видео', sub: 'Остров прячется сам, чтобы не мешать. Выключается в «Остров» → «Скрытие»' },
+      ],
+    },
+    {
+      id: 'help-mouse',
+      title: 'Мышь: скрытые жесты',
+      desc: '',
+      helpItems: [
+        { title: 'Правая кнопка мыши', sub: 'Открывает меню почти везде: у файлов на полке, закреплённых программ, задач, событий календаря. В «Буфере» — удаляет запись' },
+        { title: 'Перетаскивание', sub: 'Файлы, брошенные на свёрнутый остров, попадают на «Полку». Программу или файл, брошенные на панель под часами (когда музыка не играет), остров закрепит' },
+        { title: 'Колёсико', sub: 'Над линией громкости под треком и над плашкой громкости — меняет звук. Над строкой песни — сдвигает текст раньше или позже. Над закреплёнными программами — листает их' },
+        { title: 'Двойной клик', sub: 'По дню в календаре — расписание этого дня' },
+        { title: 'Полоса прогресса трека', sub: 'Клик и перетаскивание перематывает песню. Если плеер не принимает перемотку, полоса мигнет' },
+      ],
+    },
+    {
+      id: 'help-music',
+      title: 'Музыка',
+      desc: '',
+      helpItems: [
+        { title: 'Откуда берётся трек', sub: 'Из системного плеера Windows: Spotify, Яндекс Музыка, браузеры, Telegram — всё, что показывает обложку в меню громкости Windows. Яндекс Браузер — в «Экспериментальном»' },
+        { title: 'Текст песни', sub: 'Ищется в открытых базах и подсвечивается по словам. Есть не для всех песен. Если строки спят или опаздывают — колёсико над строкой в плеере или «Сдвиг текста» в «Музыке»' },
+        { title: 'Telegram и некоторые сайты', sub: 'Не сообщают длину трека: остров считает время сам, а перемотка с острова недоступна. Кнопки «назад» и «вперёд» тускнеют, когда листать некуда' },
       ],
     },
   ],
@@ -414,32 +477,12 @@ function Slider({ value, item, onChange, disabled }) {
   );
 }
 
-function Chips({ value, options, onChange, disabled }) {
-  return (
-    <div className="st-chips">
-      {options.map((opt) => (
-        <button
-          key={opt}
-          type="button"
-          disabled={disabled}
-          className={cx('st-chip', value === opt && 'st-chip--active')}
-          onClick={() => onChange(opt)}
-        >
-          {opt}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-// Connected displays [{ id, label, width, height, primary }], provided by SettingsWindow.
-const DisplaysContext = createContext([]);
+export const DisplaysContext = React.createContext([]);
 
 function DisplayPicker({ value, onChange, disabled }) {
-  const displays = useContext(DisplaysContext);
-  if (!displays.length) return null;
+  const displays = React.useContext(DisplaysContext);
+  if (!displays.length) return <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Нет доступных мониторов</span>;
   const primary = displays.find((d) => d.primary) || displays[0];
-  // null or a disconnected display falls back to primary, as in the main process.
   const active = displays.some((d) => d.id === value) ? value : primary.id;
   const options = displays.map((d) => ({
     value: d.id,
@@ -448,15 +491,47 @@ function DisplayPicker({ value, onChange, disabled }) {
   return <Segmented value={active} options={options} onChange={onChange} disabled={disabled} />;
 }
 
+function Chips({ value, options, onChange, disabled }) {
+  const isMulti = Array.isArray(value);
+  return (
+    <div className="st-chips">
+      {options.map((opt) => {
+        const isActive = isMulti ? value.includes(opt) : value === opt;
+        return (
+        <button
+          key={opt}
+          type="button"
+          disabled={disabled}
+          className={cx('st-chip', isActive && 'st-chip--active')}
+          onClick={() => {
+            if (isMulti) {
+              const next = isActive ? value.filter((v) => v !== opt) : [...value, opt];
+              onChange(next);
+            } else {
+              onChange(opt);
+            }
+          }}
+        >
+          {opt}
+        </button>
+      )})}
+    </div>
+  );
+}
+
 function SettingRow({ item, value, onChange }) {
   const disabled = !!item.soon;
   const stacked = item.type === 'chips';
   const control = (() => {
-    if (item.type === 'display') return <DisplayPicker value={value} onChange={onChange} disabled={disabled} />;
     if (item.type === 'toggle') return <Switch value={value} onChange={onChange} disabled={disabled} />;
     if (item.type === 'segmented') return <Segmented value={value} options={item.options} onChange={onChange} disabled={disabled} />;
     if (item.type === 'slider') return <Slider value={value} item={item} onChange={onChange} disabled={disabled} />;
-    if (item.type === 'chips') return <Chips value={value} options={item.options} onChange={onChange} disabled={disabled} />;
+    if (item.type === 'chips') {
+      return <Chips value={value} options={item.options} onChange={onChange} disabled={disabled} />;
+    }
+    if (item.type === 'display') {
+      return <DisplayPicker value={value} onChange={onChange} disabled={disabled} />;
+    }
     return null;
   })();
 
@@ -490,55 +565,151 @@ function SchemaSection({ tabId, group, values, onChange, onReset, index }) {
   );
 }
 
-function ThemePicker({ value, onChange }) {
+function ThemePicker({ value, onChange, customThemes = [], onCreate, onDelete, onEdit }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const all = [...THEMES, ...(customThemes || [])];
+
+  const create = (theme) => {
+    onCreate?.(theme);
+    setOpen(false);
+  };
+
+  const pick = (theme) => {
+    onChange?.(theme.name, theme);
+  };
+
   return (
-    <div className="st-themes">
-      {THEMES.map((theme) => {
-        const active = value === theme.name;
-        return (
-          <button
-            key={theme.name}
-            type="button"
-            className={cx('st-theme', active && 'st-theme--active')}
-            onClick={() => onChange(theme.name)}
-            title={theme.name}
-          >
-            <div className="st-theme__stage" style={{ background: theme.bg }}>
-              <div className="st-theme__pill">
-                <span className="st-theme__dot" style={{ background: theme.dot }} />
-                <span className="st-theme__bars" style={{ color: theme.dot }}>
-                  <i style={{ height: 4 }} />
-                  <i style={{ height: 7 }} />
-                  <i style={{ height: 5 }} />
-                </span>
+    <>
+      <div className="st-themes">
+        {all.map((theme) => {
+          const active = value === theme.name;
+          const isCustom = customThemes?.some((t) => t.name === theme.name);
+          return (
+            <button
+              key={theme.name}
+              type="button"
+              className={cx('st-theme', active && 'st-theme--active')}
+              onClick={() => pick(theme)}
+              onContextMenu={(e) => { if (isCustom) { e.preventDefault(); onDelete?.(theme.name); } }}
+              title={isCustom ? `${theme.name} (ПКМ — удалить)` : theme.name}
+            >
+              <div className="st-theme__stage" style={{ background: theme.bg }}>
+                <div className="st-theme__pill">
+                  <span className="st-theme__dot" style={{ background: theme.dot }} />
+                  <span className="st-theme__bars" style={{ color: theme.dot }}>
+                    <i style={{ height: 4 }} />
+                    <i style={{ height: 7 }} />
+                    <i style={{ height: 5 }} />
+                  </span>
+                </div>
               </div>
-            </div>
-            <span className="st-theme__name">{theme.name}</span>
-            {active && (
-              <span className="st-theme__check">
-                <Check size={10} weight="bold" />
-              </span>
-            )}
-          </button>
-        );
-      })}
-    </div>
+              <span className="st-theme__name">{theme.name}</span>
+              {active && (
+                <span className="st-theme__check">
+                  <Check size={10} weight="bold" />
+                </span>
+              )}
+              {isCustom && (
+                <span
+                  className="st-theme__edit"
+                  role="button"
+                  tabIndex={0}
+                  title="Редактировать тему"
+                  onClick={(e) => { e.stopPropagation(); setEditing({ ...theme, oldName: theme.name }); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); setEditing({ ...theme, oldName: theme.name }); } }}
+                >
+                  <PencilSimple size={11} />
+                </span>
+              )}
+            </button>
+          );
+        })}
+        <button type="button" className="st-theme st-theme--add" onClick={() => setOpen((o) => !o)} title="Своя тема">
+          <span className="st-theme__plus">+</span>
+          <span className="st-theme__name">Своя тема</span>
+        </button>
+      </div>
+      {open && (
+        <ThemeCreatorModal onClose={() => setOpen(false)} onSave={create} />
+      )}
+      {editing && (
+        <ThemeCreatorModal
+          initial={editing}
+          onClose={() => setEditing(null)}
+          onSave={(theme) => { onEdit?.({ ...theme, oldName: editing.oldName }); setEditing(null); }}
+        />
+      )}
+    </>
+  );
+}
+
+function HotkeyInput({ icon: Icon, title, value, onSave }) {
+  const [capturing, setCapturing] = useState(false);
+  const btnRef = useRef(null);
+
+  // When capturing, listen on window so any modifier combination is caught.
+  useEffect(() => {
+    if (!capturing) return undefined;
+    const onKeyDown = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Ignore bare modifier presses — wait for the actual key.
+      if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+      if (e.key === 'Escape') { setCapturing(false); return; }
+
+      const mods = [];
+      if (e.ctrlKey) mods.push('Control'); // Electron prefers 'Control'
+      if (e.altKey) mods.push('Alt');
+      if (e.shiftKey) mods.push('Shift');
+      if (e.metaKey) mods.push('Super');
+
+      // Use e.code to get the physical key, independent of keyboard layout (EN/RU)
+      let main = e.code;
+      if (main.startsWith('Key')) main = main.slice(3); // 'KeyM' -> 'M'
+      else if (main.startsWith('Digit')) main = main.slice(5); // 'Digit1' -> '1'
+      else if (main.startsWith('Numpad')) main = main.slice(6); // 'Numpad1' -> 'num1'
+      else {
+        const MAP = {
+          ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+          Space: 'Space', Slash: '/', Backslash: '\\', Comma: ',', Period: '.',
+          Semicolon: ';', Quote: "'", BracketLeft: '[', BracketRight: ']',
+          Minus: '-', Equal: '=', Backquote: '`',
+          Enter: 'Return', Tab: 'Tab', Backspace: 'Backspace', Delete: 'Delete',
+          Insert: 'Insert', Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
+        };
+        main = MAP[main] || main;
+      }
+
+      const accel = [...mods, main].join('+');
+      onSave(accel);
+      setCapturing(false);
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [capturing, onSave]);
+
+  return (
+    <Row icon={Icon} title={title} sub={capturing ? 'Нажмите клавишу или сочетание… (Esc — отмена)' : (value ? `${value}${(!value.includes('+') && /^[A-Za-z0-9]$/.test(value)) ? ' · только когда остров в фокусе' : ''}` : 'не задано')}>
+      <button
+        type="button"
+        ref={btnRef}
+        className={cx('st-btn', capturing && 'st-btn--capturing')}
+        onClick={() => setCapturing((c) => !c)}
+      >
+        {capturing ? 'Слушаю…' : (value || 'Изменить')}
+      </button>
+    </Row>
   );
 }
 
 function AccentPicker({ value, onChange }) {
   const isAuto = value === 'auto';
-  const custom = isAuto ? '#3b82f6' : value;
+  const isPreset = ACCENTS.includes(value);
+  const custom = isAuto ? '#3b82f6' : (value || '#3b82f6');
   return (
     <div className="st-accent">
       <div className="st-swatches">
-        <button
-          type="button"
-          className={cx('st-swatch', 'st-swatch--auto', isAuto && 'st-swatch--active')}
-          title="В цвет трека"
-          aria-label="В цвет трека"
-          onClick={() => onChange('auto')}
-        />
         {ACCENTS.map((color) => (
           <button
             key={color}
@@ -551,11 +722,20 @@ function AccentPicker({ value, onChange }) {
           />
         ))}
       </div>
+      {/* Custom color: only shown as a distinct chip when the current value is
+          NOT one of the presets, so the same colour is never shown twice. */}
       <div className="st-accent__custom">
-        <label className="st-color" style={{ background: custom }} title="Свой цвет">
+        <label
+          className={cx('st-color', !isPreset && !isAuto && 'st-color--filled')}
+          style={!isPreset && !isAuto ? { background: custom } : undefined}
+          title="Свой цвет"
+        >
           <input type="color" value={custom} onChange={(e) => onChange(e.target.value)} />
+          {isPreset || isAuto ? <span className="st-color__pipette" aria-hidden="true">＋</span> : null}
         </label>
-        <span className="st-color__label">{isAuto ? 'В цвет трека' : custom.toUpperCase()}</span>
+        <span className="st-color__label">
+          {isAuto ? 'В цвет трека' : (isPreset ? 'Свой цвет' : custom.toUpperCase())}
+        </span>
       </div>
     </div>
   );
@@ -602,7 +782,6 @@ function IslandPreview({ values, expanded, onToggle }) {
   if (values.shadow !== false) shadows.push('0 18px 44px rgba(0,0,0,0.62)');
   if (values.lightBorder !== false) shadows.push('inset 0 1px 0 rgba(255,255,255,0.1)');
   const showLyric = values.pillLyric !== false && values.syncLyrics !== false;
-  const glass = values.expGlass === true;
 
   return (
     <section className="st-preview" style={{ '--i': 0 }}>
@@ -625,9 +804,7 @@ function IslandPreview({ values, expanded, onToggle }) {
             attached && 'st-mini--attached',
           )}
           style={{
-            background: glass ? 'rgba(20,20,24,0.58)' : theme.bg,
-            backdropFilter: glass ? 'blur(18px) saturate(1.3)' : undefined,
-            WebkitBackdropFilter: glass ? 'blur(18px) saturate(1.3)' : undefined,
+            background: theme.bg,
             borderRadius: attached ? `0 0 ${Math.round(radius * Math.min(1, (values.edgeFade ?? 100) / 100))}px ${Math.round(radius * Math.min(1, (values.edgeFade ?? 100) / 100))}px` : radius,
             boxShadow: shadows.join(', ') || 'none',
             transform: `scale(${scale})`,
@@ -693,16 +870,6 @@ function SettingsWindow() {
   const [privacy, setPrivacy] = useState(true);
   const [ready, setReady] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
-  const [displays, setDisplays] = useState([]);
-
-  useEffect(() => {
-    const load = () => window.electronAPI?.getDisplays?.().then((list) => {
-      if (Array.isArray(list)) setDisplays(list);
-    });
-    load();
-    const unsub = window.electronAPI?.onDisplaysChanged?.(load);
-    return () => unsub?.();
-  }, []);
 
   useEffect(() => {
     window.electronAPI?.updateState?.().then((u) => { if (u) setUpdateInfo(u); });
@@ -770,6 +937,7 @@ function SettingsWindow() {
     const api = window.electronAPI;
     Object.entries(patch).forEach(([key, value]) => {
       if (key === 'displayMode') api?.setDisplayMode?.(value);
+      if (key === 'islandDisplay') api?.settingsSet?.('islandDisplay', value);
       else if (key === 'city') {
         api?.settingsSet?.(key, value);
         api?.setWeatherCity?.(value);
@@ -858,43 +1026,35 @@ function SettingsWindow() {
     setValue('hiddenTabs', next);
   }, [values.hiddenTabs, setValue]);
 
+  const searchIndexData = useMemo(() => buildSearchIndex({
+    tabMeta: TAB_META,
+    groups: GROUPS,
+    customSearch: CUSTOM_SEARCH,
+    islandTabs: ISLAND_TABS,
+    systemEntries: [
+      { tab: 'system', anchor: 'startup', title: 'Запускать вместе с Windows', sub: 'Автозапуск' },
+      { tab: 'system', anchor: 'weather', title: 'Город для погоды', sub: 'Если погода не определилась сама' },
+      { tab: 'system', anchor: 'integrations', title: 'Календарь и приватность', sub: 'Интеграции Windows' },
+      { tab: 'system', anchor: 'discord', title: 'Discord Rich Presence', sub: 'Показывать трек в профиле Discord' },
+    ],
+  }), []);
+
   const searchResults = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return null;
+    if (!query.trim()) return null;
+    const raw = searchIndex(searchIndexData, query);
+    if (!raw.length) return [];
 
+    // Group flat results by tab, preserving tab order.
     const grouped = new Map();
-    const push = (tabId, entry) => {
-      if (!grouped.has(tabId)) grouped.set(tabId, []);
-      grouped.get(tabId).push(entry);
-    };
-
-    TAB_META.forEach((meta) => {
-      (GROUPS[meta.id] || []).forEach((group) => {
-        (group.items || []).forEach((item) => {
-          const haystack = `${item.title} ${item.sub || ''} ${item.key}`.toLowerCase();
-          if (haystack.includes(q)) push(meta.id, { kind: 'setting', item });
-        });
-      });
-    });
-
-    CUSTOM_SEARCH.forEach((entry) => {
-      const haystack = `${entry.title} ${entry.sub || ''}`.toLowerCase();
-      if (haystack.includes(q)) push(entry.tab, { kind: 'nav', entry });
-    });
-
-    ISLAND_TABS.filter((t) => !t.fixed).forEach((t) => {
-      if (t.label.toLowerCase().includes(q)) {
-        push('tabs', {
-          kind: 'nav',
-          entry: { tab: 'tabs', anchor: 'tabs-list', title: `Вкладка «${t.label}»`, sub: 'Показать или скрыть в меню острова', icon: t.icon },
-        });
-      }
-    });
+    for (const entry of raw) {
+      if (!grouped.has(entry.tab)) grouped.set(entry.tab, []);
+      grouped.get(entry.tab).push(entry);
+    }
 
     return TAB_META
       .filter((meta) => grouped.has(meta.id))
       .map((meta) => ({ meta, entries: grouped.get(meta.id) }));
-  }, [query]);
+  }, [query, searchIndexData]);
 
   const activeMeta = TAB_META.find((t) => t.id === tab) || TAB_META[0];
   const uiAccent = values.accent && values.accent !== 'auto' ? values.accent : '#3b82f6';
@@ -914,7 +1074,34 @@ function SettingsWindow() {
               </div>
               <ResetButton onReset={() => resetKeys(['theme'])} />
             </div>
-            <ThemePicker value={values.theme} onChange={(v) => setValue('theme', v)} />
+            <ThemePicker
+              value={values.theme}
+              onChange={(name, theme) => {
+                setValue('theme', name);
+                // A custom theme carries its own accent — apply it so the
+                // accent picker and the island match the chosen theme.
+                if (theme && theme.dot && (values.customThemes || []).some((t) => t.name === name)) {
+                  setValue('accent', theme.dot);
+                }
+              }}
+              customThemes={values.customThemes || []}
+              onCreate={(theme) => {
+                const next = [...(values.customThemes || []), theme];
+                setValue('customThemes', next);
+                setValue('theme', theme.name);
+                if (theme.dot) setValue('accent', theme.dot);
+              }}
+              onDelete={(name) => {
+                const next = (values.customThemes || []).filter((t) => t.name !== name);
+                setValue('customThemes', next);
+                if (values.theme === name) setValue('theme', 'Классика');
+              }}
+              onEdit={(theme) => {
+                const next = (values.customThemes || []).map((t) => (t.name === theme.oldName || t.name === theme.name ? { ...t, ...theme } : t));
+                setValue('customThemes', next);
+                if (values.theme === theme.name && theme.dot) setValue('accent', theme.dot);
+              }}
+            />
           </section>
           <section id="sec-appearance-accent" className="st-section" style={{ '--i': 2 }}>
             <div className="st-section__head">
@@ -979,10 +1166,51 @@ function SettingsWindow() {
       );
     }
 
+    if (tab === 'help') {
+      return GROUPS.help.map((group, i) => (
+        <section id={`sec-help-${group.id}`} className="st-section" style={{ '--i': i }} key={group.id}>
+          <div className="st-section__head">
+            <div>
+              <div className="st-section__title">{group.title}</div>
+            </div>
+          </div>
+          {group.helpItems.map((item, idx) => (
+            <div className="st-row" key={idx}>
+              <div className="st-row__text">
+                <div className="st-row__title">{item.title}</div>
+                <div className="st-row__sub">{item.sub}</div>
+              </div>
+            </div>
+          ))}
+        </section>
+      ));
+    }
+
     if (tab === 'system') {
       return (
         <>
-          <section id="sec-system-startup" className="st-section" style={{ '--i': 0 }}>
+          <section id="sec-system-hotkeys" className="st-section" style={{ '--i': 0 }}>
+            <div className="st-section__head">
+              <div>
+                <div className="st-section__title">Горячие клавиши</div>
+                <div className="st-section__desc">Глобальные сочетания, работают из любого приложения. Формат: Control+Alt+I</div>
+              </div>
+            </div>
+            <HotkeyInput
+              icon={Keyboard}
+              title="Показать/скрыть остров"
+              value={values.hotkeyToggle}
+              onSave={(v) => setValue('hotkeyToggle', v)}
+            />
+            <HotkeyInput
+              icon={MusicNote}
+              title="Играть/пауза"
+              value={values.hotkeyPlayPause}
+              onSave={(v) => setValue('hotkeyPlayPause', v)}
+            />
+          </section>
+
+          <section id="sec-system-startup" className="st-section" style={{ '--i': 1 }}>
             <div className="st-section__head">
               <div>
                 <div className="st-section__title">Запуск</div>
@@ -1023,8 +1251,18 @@ function SettingsWindow() {
             <Row icon={LockSimple} title="Индикаторы приватности" sub="Точки камеры и микрофона рядом с островом">
               <Switch value={privacy} onChange={togglePrivacy} />
             </Row>
-            <Row icon={MusicNote} title="Discord Rich Presence" sub="Показывать текущий трек в профиле Discord">
-              <Switch value={values.discordRPC === true} onChange={(v) => setValue('discordRPC', v)} />
+          </section>
+
+          <section id="sec-system-discord" className="st-section" style={{ '--i': 1 }}>
+            <div className="st-section__head">
+              <div>
+                <div className="st-section__title">Discord</div>
+                <div className="st-section__desc">Показывать текущий трек в профиле Discord.</div>
+              </div>
+              <ResetButton onReset={() => resetKeys(['discordRPC'])} />
+            </div>
+            <Row icon={Sparkle} title="Discord Rich Presence" sub="Название трека и исполнитель в статусе Discord">
+              <Switch value={!!values.discordRPC} onChange={(v) => setValue('discordRPC', v)} />
             </Row>
           </section>
 
@@ -1058,7 +1296,6 @@ function SettingsWindow() {
   };
 
   return (
-    <DisplaysContext.Provider value={displays}>
     <div className="st-app" style={{ '--accent': uiAccent }}>
       <div className="st-titlebar">
         <span className="st-titlebar__mark" />
@@ -1074,7 +1311,7 @@ function SettingsWindow() {
       <div className="st-body">
         <aside className="st-sidebar">
           <div className="st-brand">
-            <img className="st-brand__logo" src="/icon.png" alt="Istel" style={{ objectFit: 'cover' }} />
+            <img className="st-brand__logo" src="./icon.png" alt="Istel" style={{ objectFit: 'cover' }} />
             <div>
               <div className="st-brand__name">Istel</div>
               <div className="st-brand__sub">Настройки</div>
@@ -1145,7 +1382,7 @@ function SettingsWindow() {
             </div>
           )}
           <div className="st-sidebar__footer">
-            <span className="st-sidebar__version">v{updateInfo?.current || '1.0.1'}</span>
+            <span className="st-sidebar__version">v{updateInfo?.current || '1.1.0'}</span>
             <button type="button" className="st-linkbtn" onClick={() => setConfirmReset(true)}>
               Сбросить всё
             </button>
@@ -1184,7 +1421,7 @@ function SettingsWindow() {
                         </div>
                       </div>
                       {entries.map((entry, entryIndex) => {
-                        if (entry.kind === 'setting') {
+                        if (entry.kind === 'setting' && entry.item) {
                           return (
                             <SettingRow
                               key={`${meta.id}-${entry.item.key}-${entryIndex}`}
@@ -1194,10 +1431,10 @@ function SettingsWindow() {
                             />
                           );
                         }
-                        const { entry: navEntry } = entry;
+                        // Navigation entry (tab/group title).
                         return (
-                          <Row key={`${meta.id}-nav-${entryIndex}`} icon={navEntry.icon} title={navEntry.title} sub={navEntry.sub}>
-                            <button type="button" className="st-btn" onClick={() => openTab(navEntry.tab, navEntry.anchor)}>
+                          <Row key={`${meta.id}-nav-${entryIndex}`} icon={MagnifyingGlass} title={entry.title} sub={entry.sub}>
+                            <button type="button" className="st-btn" onClick={() => openTab(entry.tab, entry.anchor)}>
                               Открыть
                               <CaretRight size={12} />
                             </button>
@@ -1269,7 +1506,6 @@ function SettingsWindow() {
         </div>
       )}
     </div>
-    </DisplaysContext.Provider>
   );
 }
 

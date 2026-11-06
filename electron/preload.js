@@ -4,6 +4,28 @@
 
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+// Batched event emitter: coalesces rapid events into a single callback per frame.
+function batchedListener(channel, callback) {
+  let pending = null;
+  let scheduled = false;
+  const flush = () => {
+    scheduled = false;
+    if (pending === null) return;
+    const value = pending;
+    pending = null;
+    callback(value);
+  };
+  const handler = (_event, data) => {
+    pending = data;
+    if (!scheduled) {
+      scheduled = true;
+      requestAnimationFrame(flush);
+    }
+  };
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   // ---- Media Controls ----
   mediaPlayPause: () => ipcRenderer.invoke('media-play-pause'),
@@ -44,46 +66,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pomodoroStart: () => ipcRenderer.invoke('pomodoro-start'),
   pomodoroPause: () => ipcRenderer.invoke('pomodoro-pause'),
   pomodoroReset: () => ipcRenderer.invoke('pomodoro-reset'),
-  onPomodoroState: (cb) => {
-    const h = (_e, d) => cb(d);
-    ipcRenderer.on('pomodoro-state', h);
-    return () => ipcRenderer.removeListener('pomodoro-state', h);
-  },
-  onPomodoroFinished: (cb) => {
-    const h = (_e, d) => cb(d);
-    ipcRenderer.on('pomodoro-finished', h);
-    return () => ipcRenderer.removeListener('pomodoro-finished', h);
-  },
-  onDownloadStart: (cb) => {
-    const h = (_e, d) => cb(d);
-    ipcRenderer.on('download-start', h);
-    return () => ipcRenderer.removeListener('download-start', h);
-  },
-  onDownloadProgress: (cb) => {
-    const h = (_e, d) => cb(d);
-    ipcRenderer.on('download-progress', h);
-    return () => ipcRenderer.removeListener('download-progress', h);
-  },
-  onDownloadDone: (cb) => {
-    const h = (_e, d) => cb(d);
-    ipcRenderer.on('download-done', h);
-    return () => ipcRenderer.removeListener('download-done', h);
-  },
-  onIslandFullscreen: (cb) => {
-    const h = (_e, d) => cb(d);
-    ipcRenderer.on('island-fullscreen', h);
-    return () => ipcRenderer.removeListener('island-fullscreen', h);
-  },
-  onSystemEvent: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('system-event', handler);
-    return () => ipcRenderer.removeListener('system-event', handler);
-  },
-  onNotification: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('notification', handler);
-    return () => ipcRenderer.removeListener('notification', handler);
-  },
+  onPomodoroState: (cb) => batchedListener('pomodoro-state', cb),
+  onPomodoroFinished: (cb) => batchedListener('pomodoro-finished', cb),
+  onDownloadStart: (cb) => batchedListener('download-start', cb),
+  onDownloadProgress: (cb) => batchedListener('download-progress', cb),
+  onDownloadDone: (cb) => batchedListener('download-done', cb),
+  onIslandFullscreen: (cb) => batchedListener('island-fullscreen', cb),
+  onSystemEvent: (cb) => batchedListener('system-event', cb),
+  onNotification: (cb) => batchedListener('notification', cb),
 
   // ---- Open source app ----
   openSourceApp: (sourceId) => ipcRenderer.invoke('open-source-app', sourceId),
@@ -92,21 +82,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setIgnoreMouseEvents: (ignore, options) => ipcRenderer.send('set-ignore-mouse-events', ignore, options),
   setWindowSize: (width, height) => ipcRenderer.send('set-window-size', width, height),
   getWindowBounds: () => ipcRenderer.invoke('get-window-bounds'),
+  setIslandExpanded: (expanded) => ipcRenderer.send('island-expanded', !!expanded),
 
   // ---- Calendar ----
   getCalendarEvents: () => ipcRenderer.invoke('get-calendar-events'),
 
   // ---- Real-time updates ----
-  onMediaUpdate: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('media-update', handler);
-    return () => ipcRenderer.removeListener('media-update', handler);
-  },
-  onLyricsUpdate: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('lyrics-update', handler);
-    return () => ipcRenderer.removeListener('lyrics-update', handler);
-  },
+  onMediaUpdate: (callback) => batchedListener('media-update', callback),
+  onLyricsUpdate: (callback) => batchedListener('lyrics-update', callback),
   onIslandBlur: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('island-blur', handler);
@@ -114,29 +97,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   setWeatherCity: (city) => ipcRenderer.invoke('set-weather-city', city),
   getBattery: () => ipcRenderer.invoke('get-battery'),
-  onBatteryUpdate: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('battery-update', handler);
-    return () => ipcRenderer.removeListener('battery-update', handler);
-  },
+  onBatteryUpdate: (cb) => batchedListener('battery-update', cb),
   settingsGetAll: () => ipcRenderer.invoke('settings-get-all'),
   settingsGetDefaults: () => ipcRenderer.invoke('settings-get-defaults'),
   settingsSet: (key, value) => ipcRenderer.invoke('settings-set', key, value),
-  onSettingsUpdate: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('settings-updated', handler);
-    return () => ipcRenderer.removeListener('settings-updated', handler);
-  },
-  onSystemInfoUpdate: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('system-info-update', handler);
-    return () => ipcRenderer.removeListener('system-info-update', handler);
-  },
-  onCalendarUpdate: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('calendar-update', handler);
-    return () => ipcRenderer.removeListener('calendar-update', handler);
-  },
+  onSettingsUpdate: (cb) => batchedListener('settings-updated', cb),
+  onSystemInfoUpdate: (cb) => batchedListener('system-info-update', cb),
+  onCalendarUpdate: (cb) => batchedListener('calendar-update', cb),
 
   // ---- Startup Settings ----
   getStartupStatus: () => ipcRenderer.invoke('get-startup-status'),
@@ -151,53 +118,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPrivacyStatus: () => ipcRenderer.invoke('get-privacy-status'),
   togglePrivacyIndicators: (enabled) => ipcRenderer.invoke('toggle-privacy-indicators', enabled),
   getPrivacyState: () => ipcRenderer.invoke('get-privacy-state'),
-
-  onPrivacyUpdate: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('privacy-update', handler);
-    return () => ipcRenderer.removeListener('privacy-update', handler);
-  },
+  onPrivacyUpdate: (cb) => batchedListener('privacy-update', cb),
 
   // ---- Display Mode ----
   getDisplayMode: () => ipcRenderer.invoke('get-display-mode'),
-  setDisplayMode: (mode) => ipcRenderer.invoke('set-display-mode', mode),
-  onDisplayModeChanged: (callback) => {
-    const handler = (_event, mode) => callback(mode);
-    ipcRenderer.on('display-mode-changed', handler);
-    return () => ipcRenderer.removeListener('display-mode-changed', handler);
-  },
-
   getDisplays: () => ipcRenderer.invoke('get-displays'),
   onDisplaysChanged: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('displays-changed', handler);
     return () => ipcRenderer.removeListener('displays-changed', handler);
   },
+  setDisplayMode: (mode) => ipcRenderer.invoke('set-display-mode', mode),
+  onDisplayModeChanged: (cb) => batchedListener('display-mode-changed', cb),
 
   // ---- Clipboard ----
-  onClipboardUpdate: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('clipboard-update', handler);
-    return () => ipcRenderer.removeListener('clipboard-update', handler);
-  },
+  onClipboardUpdate: (cb) => batchedListener('clipboard-update', cb),
   clipboardGetHistory: () => ipcRenderer.invoke('clipboard-get-history'),
   clipboardPaste: (id) => ipcRenderer.invoke('clipboard-paste', id),
   clipboardDelete: (id) => ipcRenderer.invoke('clipboard-delete', id),
   clipboardClear: () => ipcRenderer.invoke('clipboard-clear'),
   clipboardSaveImage: (id) => ipcRenderer.invoke('clipboard-save-image', id),
-  onClipboardHistory: (callback) => {
-    const handler = (_event, data) => callback(data);
-    ipcRenderer.on('clipboard-history', handler);
-    return () => ipcRenderer.removeListener('clipboard-history', handler);
-  },
+  onClipboardHistory: (cb) => batchedListener('clipboard-history', cb),
 
   // ---- Active Window (Workspace) ----
-  onActiveWindowUpdate: (callback) => {
-    const handler = (_event, processName) => callback(processName);
-    ipcRenderer.on('active-window-update', handler);
-    // Return the per-listener unsubscribe (R14). The old
-    // removeActiveWindowListener() used removeAllListeners and would rip out
-    // every subscriber; callers should use this returned function instead.
-    return () => ipcRenderer.removeListener('active-window-update', handler);
-  },
+  onActiveWindowUpdate: (cb) => batchedListener('active-window-update', cb),
 });

@@ -228,7 +228,9 @@ function MusicWidget({
             className="music-bg music-bg--glow"
             style={{
               backgroundImage: 'none',
-              background: `radial-gradient(120% 120% at 30% 0%, ${accentColor}66 0%, ${accentColor}22 45%, transparent 75%)`,
+              background: accentColor === '#ffffff' 
+                ? `radial-gradient(120% 120% at 30% 0%, rgba(139, 92, 246, 0.4) 0%, rgba(139, 92, 246, 0.1) 45%, transparent 75%)`
+                : `radial-gradient(120% 120% at 30% 0%, ${accentColor}66 0%, ${accentColor}22 45%, transparent 75%)`,
             }}
           />
         ) : (

@@ -1,4 +1,5 @@
 // ============================================================
+const { safeWriteFileSync } = require('./lib/safeWrite.cjs');
 // System Info Manager
 // Polls the active keyboard layout (language) and periodically
 // fetches current weather for the user's approximate location.
@@ -8,16 +9,21 @@
 //   - weather: https://api.open-meteo.com (no key)
 // ============================================================
 
+const { execFile } = require('child_process');
 const { net } = require('electron');
-const { getHost } = require('./psHost');
-const { createGuardedPoller } = require('./lib/guardedPoller.cjs');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
-// The layout query runs in the persistent 'system' PowerShell host, so a
-// poll costs ~1 ms instead of a powershell.exe spawn + C# compile.
-const LANG_POLL_INTERVAL = 1000; // ms
+const SCRIPT_DIR = path.join(os.tmpdir(), 'island_scripts');
+const LANG_SCRIPT = path.join(SCRIPT_DIR, 'lang_query.ps1');
+
+const LANG_POLL_INTERVAL = 2000; // ms (each poll spawns PowerShell)
 const WEATHER_REFRESH_INTERVAL = 30 * 60 * 1000; // 30 min
 
-const LANG_DEFS = `
+const LANG_SCRIPT_CONTENT = `
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -27,14 +33,12 @@ public class KeyboardLayoutHelper {
   [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint idThread);
 }
 "@
-Function IslandLangQuery {
-  $hwnd = [KeyboardLayoutHelper]::GetForegroundWindow()
-  $procId = 0
-  $threadId = [KeyboardLayoutHelper]::GetWindowThreadProcessId($hwnd, [ref]$procId)
-  $layout = [KeyboardLayoutHelper]::GetKeyboardLayout($threadId)
-  $langId = [int64]$layout -band 0xFFFF
-  "LANG:$langId"
-}
+$hwnd = [KeyboardLayoutHelper]::GetForegroundWindow()
+$procId = 0
+$threadId = [KeyboardLayoutHelper]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+$layout = [KeyboardLayoutHelper]::GetKeyboardLayout($threadId)
+$langId = [int]$layout -band 0xFFFF
+Write-Output "LANG:$langId"
 `;
 
 // Map Windows primary language IDs to short display codes.
@@ -74,12 +78,11 @@ class SystemInfoManager {
     this.monitorManager = monitorManager;
     this.lastLang = null;
     this.weather = null;
+    this.langTimer = null;
     this.weatherTimer = null;
     this.coords = null;
     this.city = '';
-    this._host = getHost('system');
-    this._host.define('lang', LANG_DEFS);
-    this._langPoller = createGuardedPoller(() => this._pollLang(), LANG_POLL_INTERVAL);
+    ensureScriptDir();
   }
 
   // Set a manual city (from settings). Resolves coords via geocoding and
@@ -99,15 +102,16 @@ class SystemInfoManager {
   start() {
     // Idempotent (R3): a second start() (e.g. after fullscreen resume) must
     // not create parallel timers.
-    if (this._langPoller.running || this.weatherTimer) return;
-    this._langPoller.start();
+    if (this.langTimer || this.weatherTimer) return;
+    this._pollLang();
+    this.langTimer = setInterval(() => this._pollLang(), LANG_POLL_INTERVAL);
 
     this._refreshWeather();
     this.weatherTimer = setInterval(() => this._refreshWeather(), WEATHER_REFRESH_INTERVAL);
   }
 
   stop() {
-    this._langPoller.stop();
+    if (this.langTimer) { clearInterval(this.langTimer); this.langTimer = null; }
     if (this.weatherTimer) { clearInterval(this.weatherTimer); this.weatherTimer = null; }
   }
 
@@ -116,16 +120,22 @@ class SystemInfoManager {
   }
 
   _pollLang() {
-    return this._host.call('IslandLangQuery', [], { timeout: 2000 }).then((stdout) => {
-      const m = (stdout || '').trim().match(/LANG:(\d+)/);
-      if (!m) return;
-      const langId = parseInt(m[1], 10);
-      const code = LANG_ID_MAP[langId] || null;
-      if (code && code !== this.lastLang) {
-        this.lastLang = code;
-        this._broadcast('system-info-update', this.getState());
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', LANG_SCRIPT],
+      { timeout: 2000 },
+      (err, stdout) => {
+        if (err || !stdout) return;
+        const m = stdout.trim().match(/LANG:(\d+)/);
+        if (!m) return;
+        const langId = parseInt(m[1], 10);
+        const code = LANG_ID_MAP[langId] || null;
+        if (code && code !== this.lastLang) {
+          this.lastLang = code;
+          this._broadcast('system-info-update', this.getState());
+        }
       }
-    }, () => {});
+    );
   }
 
   async _refreshWeather() {
@@ -185,6 +195,10 @@ class SystemInfoManager {
                 icon: desc.icon,
                 text: (cur.lang_ru && cur.lang_ru[0] && cur.lang_ru[0].value) || desc.text,
                 city: cityName || city,
+                feelsLike: Math.round(parseFloat(cur.FeelsLikeC || cur.temp_C)),
+                humidity: parseInt(cur.humidity, 10),
+                wind: Math.round(parseFloat(cur.windspeedKmph || 0) / 3.6),
+                precip: parseFloat(cur.precipMM || 0),
               });
             } catch {
               resolve(null);
@@ -266,7 +280,7 @@ class SystemInfoManager {
 
   _fetchWeather(lat, lon) {
     return new Promise((resolve) => {
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code&timezone=auto`;
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&timezone=auto`;
       try {
         const req = net.request(url);
         req.setHeader('User-Agent', 'IslandApp/1.0');
@@ -285,6 +299,10 @@ class SystemInfoManager {
                 temp: Math.round(cur.temperature_2m),
                 icon: desc.icon,
                 text: desc.text,
+                feelsLike: Math.round(cur.apparent_temperature),
+                humidity: cur.relative_humidity_2m,
+                wind: Math.round(cur.wind_speed_10m),
+                precip: cur.precipitation,
               });
             } catch {
               resolve(null);
@@ -307,6 +325,13 @@ class SystemInfoManager {
       }
     }
   }
+}
+
+function ensureScriptDir() {
+  if (!fs.existsSync(SCRIPT_DIR)) {
+    fs.mkdirSync(SCRIPT_DIR, { recursive: true });
+  }
+  safeWriteFileSync(LANG_SCRIPT, LANG_SCRIPT_CONTENT, 'utf8');
 }
 
 module.exports = SystemInfoManager;

@@ -7,7 +7,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import DynamicIsland from './components/DynamicIsland';
-import SettingsWindow from './components/SettingsWindow';
+import SettingsWindow, { DisplaysContext } from './components/SettingsWindow';
 import { extractDominantColor } from './utils/colorExtractor';
 
 function IslandApp() {
@@ -23,6 +23,7 @@ function IslandApp() {
   const [lyrics, setLyrics] = useState(null);
   const [wordSync, setWordSync] = useState(null);
   const [shelfItems, setShelfItems] = useState([]);
+  const [shelfLoaded, setShelfLoaded] = useState(false);
   const [pinnedItems, setPinnedItems] = useState([]);
 
   useEffect(() => {
@@ -84,8 +85,9 @@ function IslandApp() {
 
   useEffect(() => {
     window.electronAPI?.shelfLoad?.().then((items) => {
-      if (items) setShelfItems(items);
-    });
+      if (Array.isArray(items)) setShelfItems(items);
+      setShelfLoaded(true);
+    }).catch(() => setShelfLoaded(true));
   }, []);
   const copiedTimeoutRef = useRef(null);
 
@@ -97,14 +99,19 @@ function IslandApp() {
   const handleMediaUpdate = useCallback((state) => {
     if (!state) return;
 
-    // Main only sends the artwork when it changed (`artworkUnchanged` updates
-    // arrive without it). Any real artwork refreshes the cache; a missing
-    // one (or the legacy '__same__' sentinel) is filled from the cache.
-    const hasArtwork = typeof state.artwork === 'string' && state.artwork.length > 10 && state.artwork !== '__same__';
-    if (hasArtwork) {
+    // Main process keeps the real base64 on the state and flags repeats via
+    // `artworkUnchanged`; the legacy '__same__' sentinel is still honored in
+    // case an older main build is paired with this renderer.
+    if (state.artwork === '__same__' || state.artworkUnchanged) {
+      if (!state.artwork || state.artwork === '__same__' || state.artwork.length < 10) {
+        state.artwork = cachedArtworkRef.current;
+      }
+    } else if (state.artwork && state.artwork.length > 10) {
       cachedArtworkRef.current = state.artwork;
-    } else if (cachedArtworkRef.current) {
-      state.artwork = cachedArtworkRef.current;
+    } else if (!state.artwork || state.artwork.length < 10) {
+      if (cachedArtworkRef.current) {
+        state.artwork = cachedArtworkRef.current;
+      }
     }
 
     setMediaState({ ...state });
@@ -249,11 +256,19 @@ function IslandApp() {
   // Subscribe to notification updates
   // ----------------------------------------------------------
   useEffect(() => {
+    let clearTimer = null;
     const unsub = window.electronAPI?.onNotification?.((data) => {
-      setNotification(data);
-      setTimeout(() => setNotification(null), notifDurationRef.current * 1000);
+      if (clearTimer) clearTimeout(clearTimer);
+      setNotification(data ? { ...data, receivedAt: Date.now() } : null);
+      clearTimer = setTimeout(() => {
+        clearTimer = null;
+        setNotification(null);
+      }, notifDurationRef.current * 1000);
     });
-    return () => unsub?.();
+    return () => {
+      unsub?.();
+      if (clearTimer) clearTimeout(clearTimer);
+    };
   }, []);
 
   // ----------------------------------------------------------
@@ -336,7 +351,7 @@ function IslandApp() {
       notification={notification}
       lyrics={lyrics}
       wordSync={wordSync}
-      shelfItems={shelfItems}
+      shelfItems={shelfLoaded ? shelfItems : []}
       setShelfItems={setShelfItems}
       pinnedItems={pinnedItems}
       setPinnedItems={setPinnedItems}
@@ -367,7 +382,22 @@ function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  return route === 'settings' ? <SettingsWindow /> : <IslandApp />;
+  const [displays, setDisplays] = useState([]);
+
+  useEffect(() => {
+    const load = () => window.electronAPI?.getDisplays?.().then((list) => {
+      if (Array.isArray(list)) setDisplays(list);
+    });
+    load();
+    const unsub = window.electronAPI?.onDisplaysChanged?.(load);
+    return () => unsub?.();
+  }, []);
+
+  return route === 'settings' ? (
+    <DisplaysContext.Provider value={displays}>
+      <SettingsWindow />
+    </DisplaysContext.Provider>
+  ) : <IslandApp />;
 }
 
 export default App;

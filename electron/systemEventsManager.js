@@ -1,54 +1,65 @@
-// ============================================================
-// System Events Manager
-// Watches Caps Lock and broadcasts a toast event on change.
-// Runs in the persistent 'system' PowerShell host (psHost.js) instead of
-// spawning powershell.exe every second.
-// ============================================================
+const { execFile } = require('child_process');
+const { safeWriteFileSync } = require('./lib/safeWrite.cjs');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
-const { getHost } = require('./psHost');
-const { createGuardedPoller } = require('./lib/guardedPoller.cjs');
+const SCRIPT_DIR = path.join(os.tmpdir(), 'island_scripts');
+const CAPS_SCRIPT = path.join(SCRIPT_DIR, 'caps.ps1');
 
-// 1 s keeps the Caps Lock toast responsive; in the warm host a check costs
-// about a millisecond.
-const POLL_INTERVAL = 1000;
-
-const CAPS_DEFS = `
-Function IslandCapsQuery { "CAPS:$([Console]::CapsLock)" }
-`;
+function ensureScript() {
+  if (!fs.existsSync(SCRIPT_DIR)) {
+    fs.mkdirSync(SCRIPT_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(CAPS_SCRIPT)) {
+    safeWriteFileSync(CAPS_SCRIPT, `
+Add-Type -AssemblyName System.Windows.Forms
+$caps = [Console]::CapsLock
+Write-Output "CAPS:$caps"
+`, 'utf8');
+  }
+}
 
 class SystemEventsManager {
   constructor(monitorManager) {
     this.monitorManager = monitorManager;
     this.lastCapsLock = null;
-    this._host = getHost('system');
-    this._host.define('caps', CAPS_DEFS);
-    this._poller = createGuardedPoller(() => this.checkEvents(), POLL_INTERVAL);
+    this.interval = null;
+    ensureScript();
   }
 
   start() {
-    this._poller.start();
+    // 1s keeps the Caps Lock toast responsive (this script is tiny and does
+    // not touch audio, so it does not affect playback).
+    this.interval = setInterval(() => this.checkEvents(), 1000);
   }
 
   stop() {
-    this._poller.stop();
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
   }
 
   checkEvents() {
-    return this._host.call('IslandCapsQuery', [], { timeout: 3000 }).then((stdout) => {
-      const line = (stdout || '').trim();
-      if (!line.startsWith('CAPS:')) return;
-      const caps = line.split(':')[1] === 'True';
-      // First reading just seeds the baseline — do NOT broadcast it,
-      // otherwise the app fires a phantom Caps Lock event on every launch.
-      if (this.lastCapsLock === null) {
-        this.lastCapsLock = caps;
-        return;
+    execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', CAPS_SCRIPT], { timeout: 3000 }, (error, stdout) => {
+      if (error || !stdout) return;
+      const line = stdout.trim();
+      if (line.startsWith('CAPS:')) {
+        const caps = line.split(':')[1] === 'True';
+        // First reading just seeds the baseline — do NOT broadcast it,
+        // otherwise the app fires a phantom Caps Lock event on every launch.
+        if (this.lastCapsLock === null) {
+          this.lastCapsLock = caps;
+          return;
+        }
+        if (caps !== this.lastCapsLock) {
+          this.lastCapsLock = caps;
+          try { fs.appendFileSync('debug.log', `[${new Date().toISOString()}] Caps Lock: ${caps}\n`); } catch (e) {}
+          this.broadcast('system-event', { type: 'capslock', enabled: caps });
+        }
       }
-      if (caps !== this.lastCapsLock) {
-        this.lastCapsLock = caps;
-        this.broadcast('system-event', { type: 'capslock', enabled: caps });
-      }
-    }, () => {});
+    });
   }
 
   broadcast(channel, data) {

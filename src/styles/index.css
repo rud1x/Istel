@@ -22,7 +22,7 @@
   --btn-active: rgba(255, 255, 255, 0.18);
   --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --art-size-expanded: 70px;
-  --thumb-size: 25px;
+  --thumb-size: 28px;
 }
 
 html,
@@ -90,13 +90,19 @@ body,
   z-index: 0;
 }
 
-/* Pill mode shadows */
+/* Pill mode shadows — soft, natural, premium */
 .island--pill {
   box-shadow:
-    0 8px 30px rgba(0, 0, 0, 0.55),
-    0 2px 8px rgba(0, 0, 0, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 0 0 1px rgba(255, 255, 255, 0.04);
+    0 4px 14px rgba(0, 0, 0, 0.35),
+    0 1px 3px rgba(0, 0, 0, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.island--pill:hover {
+  box-shadow:
+    0 6px 20px rgba(0, 0, 0, 0.45),
+    0 2px 6px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 /* Attached mode — bottom shadow only, subtle bottom edge glow */
@@ -132,6 +138,41 @@ body,
 .island--attached .island-glow {
   opacity: 0.3;
 }
+
+/* =============================================================
+   Concave shoulders — выгнутые плечи по бокам снизу
+   ============================================================= */
+.island--pill.island--live-edge::after,
+.island--pill.island--live-edge::before {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+  background: var(--island-bg, #000000);
+  z-index: 2;
+}
+
+.island--pill.island--live-edge::before {
+  left: -12px;
+  border-bottom-right-radius: 12px;
+  box-shadow: 4px 4px 0 0 var(--island-bg, #000000);
+  clip-path: path('M 12 0 Q 12 12 0 12 L 0 0 Z');
+}
+
+.island--pill.island--live-edge::after {
+  right: -12px;
+  border-bottom-left-radius: 12px;
+  box-shadow: -4px 4px 0 0 var(--island-bg, #000000);
+  clip-path: path('M 0 0 Q 0 12 12 12 L 12 0 Z');
+}
+
+/* =============================================================
+   Live Edge — audio-reactive liquid wave (see LiveEdge.jsx).
+   The animated border-radius keyframes were removed: they were always
+   overridden by the inline borderRadius/clipPath set by the component.
+   ============================================================= */
 
 /* =============================================================
    Collapsed Content
@@ -170,8 +211,9 @@ body,
   align-items: center;
   justify-content: space-between;
   gap: 0;
-  padding: 0 16px;
+  padding: 0 14px;
   width: 100%;
+  height: 100%;
 }
 
 .idle-group-left,
@@ -187,27 +229,36 @@ body,
 
 .idle-clock {
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: #fff;
 }
 
 .idle-lang {
-  font-size: 10px;
-  padding: 2px 4px;
-  background: rgba(255,255,255,0.1);
-  border-radius: 4px;
-  color: rgba(255,255,255,0.7);
-  margin: 0 4px;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 2px 6px;
+  background: #2a2a2e;
+  border-radius: 6px;
+  color: rgba(255,255,255,0.92);
+  margin: 0 6px;
+  line-height: 1;
+  border: 1px solid rgba(255,255,255,0.06);
 }
 
 .idle-weather {
-  font-size: 13px;
+  font-size: 14px;
   color: rgba(255,255,255,0.8);
+  margin-right: 8px;
+  font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', sans-serif;
 }
 
 .idle-date {
-  font-size: 13px;
-  color: rgba(255,255,255,0.6);
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.75);
+  letter-spacing: -0.01em;
 }
 
 .island-clock {
@@ -577,6 +628,7 @@ body,
   object-fit: cover;
   flex-shrink: 0;
   border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
 .island-thumb-placeholder {
@@ -1347,4 +1399,19 @@ input:disabled + .slider {
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+/* Living background + copy wave */
+@keyframes islandLivingBg {
+  0% { opacity: 0.55; transform: scale(1) translateY(0); }
+  50% { opacity: 0.8; transform: scale(1.05) translateY(-2px); }
+  100% { opacity: 0.55; transform: scale(1) translateY(0); }
+}
+@keyframes islandCopyWave {
+  0% { transform: translateX(-60%); opacity: 0; }
+  30% { opacity: 0.9; }
+  100% { transform: translateX(60%); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .island-living-bg { animation: none !important; }
 }

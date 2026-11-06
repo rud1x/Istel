@@ -14,8 +14,10 @@ class ConfigManager {
     this.userDataPath = app.getPath('userData');
     this.configPath = path.join(this.userDataPath, 'config.json');
 
-    this.baseConfigPath = app.isPackaged 
-      ? path.join(path.dirname(app.getPath('exe')), 'config.json')
+    // In a packaged build the file lives inside app.asar, not next to the exe.
+    // app.getAppPath() resolves to the asar root, which fs can read directly.
+    this.baseConfigPath = app.isPackaged
+      ? path.join(app.getAppPath(), 'config.json')
       : path.join(process.cwd(), 'config.json');
 
     // 2. Ensure userData directory exists

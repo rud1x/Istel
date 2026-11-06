@@ -2,7 +2,7 @@
 // Istel — Main Process
 // ============================================================
 
-const { app, ipcMain, screen, shell, BrowserWindow, dialog, session, desktopCapturer } = require('electron');
+const { app, ipcMain, screen, shell, BrowserWindow, dialog, session, desktopCapturer, globalShortcut } = require('electron');
 const path = require('path');
 const ConfigManager = require('./configManager');
 const MonitorManager = require('./monitorManager');
@@ -27,6 +27,90 @@ const PomodoroManager = require('./pomodoroManager');
 const DiscordManager = require('./discordManager');
 const UpdateManager = require('./updateManager');
 const psHost = require('./psHost');
+// Track local hotkey handlers per window
+const localHotkeyHandlers = new Map();
+
+function clearLocalHotkeys() {
+  if (!monitorManager) return;
+  for (const [, entry] of monitorManager.windows) {
+    if (entry.win && !entry.win.isDestroyed()) {
+      const h = localHotkeyHandlers.get(entry.win.webContents.id);
+      if (h) {
+        try { entry.win.webContents.removeListener('before-input-event', h); } catch {}
+        localHotkeyHandlers.delete(entry.win.webContents.id);
+      }
+    }
+  }
+}
+
+function addLocalHotkey(accel, fn) {
+  if (!monitorManager) return false;
+  const expected = String(accel).toLowerCase();
+  const handler = (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.control || input.alt || input.meta || input.shift) return;
+    const k = String(input.key || '').toLowerCase();
+    if (k !== expected) return;
+    try { fn(); } catch (e) { console.log('[Hotkeys] local handler error:', e.message); }
+  };
+  let added = false;
+  for (const [, entry] of monitorManager.windows) {
+    if (entry.win && !entry.win.isDestroyed()) {
+      entry.win.webContents.on('before-input-event', handler);
+      localHotkeyHandlers.set(entry.win.webContents.id, handler);
+      added = true;
+    }
+  }
+  return added;
+}
+
+// Register global hotkeys from settings. Re-run on change so the user can
+// rebind without a restart.
+function registerHotkeys() {
+  try { globalShortcut.unregisterAll(); } catch {}
+  clearLocalHotkeys();
+  const toggle = configManager?.get('hotkeyToggle', 'Control+Alt+I');
+  const playPause = configManager?.get('hotkeyPlayPause', 'Control+Alt+P');
+  const nextTrack = configManager?.get('hotkeyNext', 'Control+Alt+Right');
+  const prevTrack = configManager?.get('hotkeyPrev', 'Control+Alt+Left');
+  const volUp = configManager?.get('hotkeyVolUp', 'Control+Alt+Up');
+  const volDown = configManager?.get('hotkeyVolDown', 'Control+Alt+Down');
+  const safe = (accel, fn) => {
+    if (!accel) return;
+    const hasPlus = accel.includes('+');
+    const isLetterOrDigit = /^[A-Za-z0-9]$/.test(accel);
+    // Single letter/digit → local-only (avoids hijacking normal typing)
+    if (!hasPlus && isLetterOrDigit) {
+      const ok = addLocalHotkey(accel, fn);
+      console.log(`[Hotkeys] ${ok ? 'registered' : 'failed'} local: ${accel}`);
+      return;
+    }
+    // Everything else (combos, function keys) → global
+    try {
+      const ok = globalShortcut.register(accel, fn);
+      if (!ok) console.log(`[Hotkeys] could not register ${accel} (busy)`);
+      else console.log(`[Hotkeys] registered global: ${accel}`);
+    } catch (e) {
+      console.log(`[Hotkeys] invalid accelerator ${accel}: ${e.message}`);
+    }
+  };
+  safe(toggle, () => {
+    if (!monitorManager) return;
+    const anyVisible = [...monitorManager.windows.values()].some((e) => e.win && !e.win.isDestroyed() && e.win.isVisible());
+    for (const [, entry] of monitorManager.windows) {
+      if (!entry.win || entry.win.isDestroyed()) continue;
+      if (anyVisible) { entry._trayHidden = true; entry.win.hide(); }
+      else { entry._trayHidden = false; entry.win.show(); }
+    }
+  });
+  safe(playPause, () => {
+    mediaManager?.sendCommand('play-pause');
+  });
+  safe(nextTrack, () => mediaManager?.sendCommand('next'));
+  safe(prevTrack, () => mediaManager?.sendCommand('previous'));
+  safe(volUp, () => volumeManager?.setLevel((volumeManager.lastLevel || 50) + 5));
+  safe(volDown, () => volumeManager?.setLevel((volumeManager.lastLevel || 50) - 5));
+}
 
 // ------------------------------------------------------------------
 // Process model tuning (before app.whenReady).
@@ -54,6 +138,17 @@ try { app.setAppUserModelId('com.istel.app'); } catch {}
 
 // Treat local (unpackaged) runs as development
 const isDev = !app.isPackaged;
+
+// Only one Istel may run at a time. Without this the `second-instance`
+// handler below never fires and launching the app (or "test startup")
+// spawns a second island + tray.
+let gotSingleInstanceLock = true;
+try {
+  gotSingleInstanceLock = app.requestSingleInstanceLock();
+} catch {}
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
 
 // Global references
 let configManager = null;
@@ -86,7 +181,6 @@ function startDiscordOnlyPolling() {
   if (!discordManager || !mediaManager) return;
   if (discordOnlyPollTimer) return;
   const tick = () => {
-    // Nothing to feed when Rich Presence is off — skip the SMTC query.
     if (!configManager?.get('discordRPC', false)) return;
     // forceUpdate() queries SMTC without starting/stopping the audio endpoint
     // poll, and routes through the same Discord update path.
@@ -119,6 +213,15 @@ const SETTINGS_DEFAULTS = {
   capslock: true,
   pillLyric: true,
   hideFullscreen: true,
+  artworkTheme: false,
+  copyWave: true,
+  customThemes: [],
+  hotkeyToggle: 'Control+Alt+I',
+  hotkeyPlayPause: 'Control+Alt+P',
+  hotkeyNext: 'Control+Alt+Right',
+  hotkeyPrev: 'Control+Alt+Left',
+  hotkeyVolUp: 'Control+Alt+Up',
+  hotkeyVolDown: 'Control+Alt+Down',
   theme: 'Классика',
   accent: '#ffffff',
   accentFollowTrack: true,
@@ -127,6 +230,8 @@ const SETTINGS_DEFAULTS = {
   lightBorder: true,
   shadow: true,
   scale: 100,
+  collapsedScale: 100,
+  expandedScale: 100,
   anim: 'Капля',
   wavePower: 100,
   cursorPull: 100,
@@ -138,10 +243,20 @@ const SETTINGS_DEFAULTS = {
   batteryNotif: true,
   capsNotif: true,
   clipNotif: true,
+  notifStyle: 'Стекло',
+  notifProgress: true,
+  notifIcons: true,
+  notifPosition: 'bottom',
+  notifAnimation: 'slide',
+  notifAccentTint: true,
+  liveEdge: true,
+  liveDrop: true,
+  reduceMotion: false,
+  closeAnim: 'Капля вверх',
+  miniIsland: false,
   hiddenTabs: [],
   expBeats: true,
   beatPower: 100,
-  expGlass: false,
   city: '',
   playerVolume: 100,
   downloadNotif: true,
@@ -153,7 +268,6 @@ const SETTINGS_DEFAULTS = {
   pomoDND: false,
   pomoAutoNext: true,
   discordRPC: false,
-  islandDisplay: null, // display.id the island is shown on; null = primary
 };
 
 function getAllSettings() {
@@ -189,13 +303,7 @@ function bootstrap() {
   // restart polling with THIS callback, otherwise the Discord pipeline is
   // silently dropped after the first fullscreen suspend (B1).
   const onMediaState = (mediaState) => {
-    // The artwork (tens to hundreds of KB of base64) only crosses IPC when it
-    // changed; the renderer keeps its cached copy otherwise. Discord and
-    // getMediaState() still see the full state.
-    const forRenderer = mediaState && mediaState.artworkUnchanged
-      ? { ...mediaState, artwork: undefined }
-      : mediaState;
-    monitorManager.broadcastToAll('media-update', forRenderer);
+    monitorManager.broadcastToAll('media-update', mediaState);
     lyricsManager.update(mediaState);
     discordManager?.update(mediaState);
   };
@@ -268,9 +376,7 @@ function bootstrap() {
   // We cannot reuse mediaManager (its SMTC poll touches the audio endpoint and
   // is suspended so a game keeps exclusive audio), so we run a SEPARATE, light
   // poller that only feeds Discord. It is not registered with SuspendController
-  // and is started/stopped by the fullscreen transition itself (see
-  // onHiddenChange below). It used to also be started here unconditionally,
-  // which ran a second, duplicate SMTC poll the whole time the app was open.
+  // and is started/stopped by the fullscreen transition itself.
   suspendController.register('volume', volumeManager);
   suspendController.register('systemInfo', systemInfoManager);
   suspendController.register('clipboard', clipboardManager, () => clipboardManager.startPolling((clipboardState) => {
@@ -288,6 +394,11 @@ function bootstrap() {
       monitorManager.broadcastToAll('calendar-update', events);
     }));
   }
+  // Auto-hide: slide the island up when the cursor is away from it, and back
+  // down when the cursor reaches the top edge. Polls the OS cursor because the
+  // window may be off-screen (hover events do not fire then).
+  registerHotkeys();
+
   fullscreenManager.onHiddenChange = (hidden) => {
     suspendController.setSuspended(hidden);
     // While the game owns the audio device we switch to the Discord-only
@@ -302,14 +413,8 @@ function bootstrap() {
   trayManager = new TrayManager(app, monitorManager, configManager, startupManager, settingsWindow);
 
   // 5. Display change listeners
-  screen.on('display-added', () => {
-    monitorManager.rebuildWindows();
-    settingsWindow?.broadcast('displays-changed');
-  });
-  screen.on('display-removed', () => {
-    monitorManager.rebuildWindows();
-    settingsWindow?.broadcast('displays-changed');
-  });
+  screen.on('display-added', () => { monitorManager.rebuildWindows(); settingsWindow?.broadcast('displays-changed'); });
+  screen.on('display-removed', () => { monitorManager.rebuildWindows(); settingsWindow?.broadcast('displays-changed'); });
   screen.on('display-metrics-changed', () => monitorManager.repositionAll());
 
   // Handle minimized launch
@@ -322,6 +427,7 @@ function bootstrap() {
 }
 
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return;
   // Allow the renderer to capture system audio (WASAPI loopback) so the
   // music visualizer can compute a real FFT instead of a fake animation.
   try {
@@ -335,11 +441,18 @@ app.whenReady().then(() => {
     console.log('[Main] setDisplayMediaRequestHandler failed:', e.message);
   }
 
-  bootstrap();
+  try {
+    bootstrap();
+  } catch (e) {
+    // A failure in one manager must not take down window creation and hide
+    // the island entirely. Log it and keep whatever came up.
+    console.log('[Main] bootstrap failed:', e && e.stack ? e.stack : e);
+  }
 });
 
 // Second instance handling
 app.on('second-instance', () => {
+  if (!gotSingleInstanceLock) return;
   if (monitorManager) {
     monitorManager.windows.forEach(entry => {
       if (!entry.win.isDestroyed()) {
@@ -619,15 +732,18 @@ ipcMain.handle('settings-set', (_event, key, value) => {
     if (value === false) fullscreenManager?.stop?.();
     else fullscreenManager?.start?.();
   }
-  if (key === 'islandDisplay') {
-    monitorManager?.setTargetDisplay(value);
-  }
   if (key === 'discordRPC') {
     discordManager?.setEnabled(value);
     if (value) discordManager?.update(mediaManager?.getCurrentState());
   }
   if (key.startsWith('pomo')) {
     pomodoroManager?.applySettings?.();
+  }
+  if (key.startsWith('hotkey')) {
+    registerHotkeys();
+  }
+  if (key === 'islandDisplay') {
+    monitorManager?.setTargetDisplay(value);
   }
   return true;
 });
@@ -649,7 +765,7 @@ ipcMain.handle('get-displays', () => {
   }));
 });
 
-ipcMain.handle('get-display-mode',() => monitorManager?.getDisplayMode() || 'pill');
+ipcMain.handle('get-display-mode', () => monitorManager?.getDisplayMode() || 'pill');
 ipcMain.handle('set-display-mode', (_event, mode) => {
   monitorManager?.setDisplayMode(mode);
   settingsWindow?.broadcast('display-mode-changed', mode);
@@ -680,9 +796,23 @@ ipcMain.handle('get-window-bounds', (event) => {
   return win.getBounds();
 });
 
+// Renderer reports whether the island is currently expanded so auto-hide
+// never yanks an open panel off-screen.
+ipcMain.on('island-expanded', (event, expanded) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return;
+  for (const [, entry] of monitorManager?.windows || []) {
+    if (entry.win === win) entry._islandExpanded = !!expanded;
+  }
+});
+
 ipcMain.on('set-ignore-mouse-events', (event, ignore, options) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   win?.setIgnoreMouseEvents(ignore, options);
+});
+
+app.on('will-quit', () => {
+  try { globalShortcut.unregisterAll(); } catch {}
 });
 
 app.on('window-all-closed', () => {
@@ -690,6 +820,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  if (psHost) psHost.disposeAll();
   mediaManager?.stopPolling();
   calendarManager?.stopPolling();
   privacyManager?.stopPolling();
@@ -698,10 +829,4 @@ app.on('before-quit', () => {
   workspaceManager?.stop();
   systemEventsManager?.stop();
   notificationManager?.stop();
-  volumeManager?.stop();
-  systemInfoManager?.stop();
-  stopDiscordOnlyPolling();
-  // The hosts also exit on their own when stdin closes, but end them
-  // explicitly so no powershell.exe outlives the app.
-  psHost.disposeAll();
 });

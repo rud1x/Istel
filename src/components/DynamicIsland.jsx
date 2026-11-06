@@ -5,7 +5,7 @@
 // Expanded: full music player or calendar grid
 // ============================================================
 
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import MusicWidget from './MusicWidget';
 import IdleWidget from './IdleWidget';
@@ -19,7 +19,9 @@ import SoundWave from './SoundWave';
 import PomodoroWidget from './PomodoroWidget';
 import IslandToast from './IslandToast';
 import IslandBeats from './IslandBeats';
+import LiveEdge from './LiveEdge';
 import { parseLrc } from '../utils/lyrics.mjs';
+import { splitLyricIntoPages, pageForProgress } from '../utils/lyricWindow.mjs';
 import { addNoteFromText } from '../utils/notesStore';
 import useAudioSpectrum from '../utils/useAudioSpectrum';
 
@@ -33,37 +35,52 @@ function formatTime(seconds) {
 }
 
 // Render a lyric line with the currently-sung word highlighted in accent color.
-function renderKaraokeLine(text, timing, accentColor) {
+// A line that does not fit is split into pages. We show the page that contains
+// the sung part, clipping only at the page edges (…). The page switches when
+// the sung part moves into the next page — the text does not slide word by word.
+function renderKaraokeLine(text, timing, accentColor, maxChars = 48) {
   if (!text) return null;
   if (!timing || timing.end <= timing.start) {
     return <span style={{ color: '#fff' }}>{text}</span>;
   }
-  const now = (() => {
-    // progress is computed by the caller's clock; here we approximate with the
-    // line's own timing only for the fallback path.
-    return timing.start;
-  })();
-  // Split into words keeping spaces.
-  const tokens = text.split(/(\s+)/).filter((t) => t.length > 0);
-  const weights = tokens.map((t) => Math.max(1, t.length));
-  const total = weights.reduce((a, b) => a + b, 0);
-  let acc = 0;
   const progress = timing.progress != null ? timing.progress : 0;
-  return tokens.map((tok, i) => {
-    const w = weights[i] / total;
-    const tokStart = acc;
-    const tokEnd = acc + w;
-    acc = tokEnd;
-    const isSpace = /^\s+$/.test(tok);
-    if (isSpace) return <span key={i}>{tok}</span>;
-    const active = progress >= tokStart && progress < tokEnd;
-    const sung = progress >= tokEnd;
-    return (
-      <span key={i} style={{ color: active ? accentColor : sung ? '#fff' : 'rgba(255,255,255,0.45)', fontWeight: active ? 700 : 500 }}>
-        {tok}
-      </span>
-    );
-  });
+  const pages = splitLyricIntoPages(text, maxChars);
+  const { pageIndex, leftEllipsis, rightEllipsis } = pageForProgress(pages, progress);
+  const visible = pages[pageIndex] || '';
+
+  // Word-level karaoke inside the visible page.
+  const tokens = visible.split(/(\s+)/).filter((t) => t.length > 0);
+  const weights = tokens.map((t) => Math.max(1, t.length));
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
+
+  // Where does the sung progress fall within THIS page? Distribute by page
+  // length so the highlight stays aligned with the audible text.
+  const pageLens = pages.map((p) => p.length);
+  const totalLen = pageLens.reduce((a, b) => a + b, 0) || 1;
+  const pageStart = pageLens.slice(0, pageIndex).reduce((a, b) => a + b, 0);
+  const localProgress = Math.max(0, Math.min(1, ((progress * totalLen) - pageStart) / (pageLens[pageIndex] || 1)));
+
+  let acc = 0;
+  return (
+    <>
+      {leftEllipsis && <span style={{ color: 'rgba(255,255,255,0.35)' }}>… </span>}
+      {tokens.map((tok, i) => {
+        const w = weights[i] / total;
+        const tokStart = acc;
+        const tokEnd = acc + w;
+        acc = tokEnd;
+        if (/^\s+$/.test(tok)) return <span key={i}>{tok}</span>;
+        const active = localProgress >= tokStart && localProgress < tokEnd;
+        const sung = localProgress >= tokEnd;
+        return (
+          <span key={i} style={{ color: active ? accentColor : sung ? '#fff' : 'rgba(255,255,255,0.45)', fontWeight: active ? 700 : 500 }}>
+            {tok}
+          </span>
+        );
+      })}
+      {rightEllipsis && <span style={{ color: 'rgba(255,255,255,0.35)' }}> …</span>}
+    </>
+  );
 }
 
 function formatClock() {
@@ -81,7 +98,7 @@ function formatDate(short = false) {
   return `${daysFull[now.getDay()]}, ${now.getDate()} ${monthsFull[now.getMonth()]}`;
 }
 
-function DynamicIsland({
+const DynamicIsland = memo(function DynamicIsland({
   mode,
   displayMode = 'pill',
   mediaState,
@@ -115,14 +132,22 @@ function DynamicIsland({
   const userAccent = settings.accent && settings.accent !== 'auto' ? settings.accent : null;
   const pillLyricOn = settings.pillLyric !== false && settings.syncLyrics !== false;
   const roundness = typeof settings.roundness === 'number' ? settings.roundness : 75;
-  const scalePct = typeof settings.scale === 'number' ? settings.scale : 100;
+  const scalePct = 100;
   const [isExpanded, setIsExpanded] = useState(false);
+
+  // Tell the main process whether the island is open so the auto-hide poller
+  // never slides an expanded panel off-screen.
+  useEffect(() => {
+    window.electronAPI?.setIslandExpanded?.(isExpanded);
+  }, [isExpanded]);
   const [expandSignal, setExpandSignal] = useState(0);
   const [shouldShowMedia, setShouldShowMedia] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const [activeApp, setActiveApp] = useState(null);
   const [currentTime, setCurrentTime] = useState(() => formatClock());
   const [systemEvent, setSystemEvent] = useState(null);
+  const [volumeBanner, setVolumeBanner] = useState(null);
+  const volumeTimerRef = useRef(null);
   const [activeTab, setActiveTab] = useState('player');
   const [qrSignal, setQrSignal] = useState(0);
   const [qrPresetText, setQrPresetText] = useState('');
@@ -194,7 +219,7 @@ function DynamicIsland({
   const hoverOpenTimerRef = useRef(null);
   const hoverCloseTimerRef = useRef(null);
   const [collapsedPos, setCollapsedPos] = useState(0);
-  const [magnet, setMagnet] = useState({ x: 0, y: 0 });
+  const magnet = { x: 0, y: 0 };
 
   // "Plush" magnet: when the cursor is near the (collapsed) island, drift a
   // Track the cursor so the mouseleave-collapse can verify it is really
@@ -205,33 +230,6 @@ function DynamicIsland({
     window.addEventListener('mousemove', track);
     return () => window.removeEventListener('mousemove', track);
   }, []);
-
-  // little toward it for a soft, rubbery feel.
-  useEffect(() => {
-    const handler = (e) => {
-      const el = islandRef.current;
-      if (!el || isExpanded) {
-        setMagnet((m) => (m.x === 0 && m.y === 0 ? m : { x: 0, y: 0 }));
-        return;
-      }
-      const r = el.getBoundingClientRect();
-      const cx = r.left + r.width / 2;
-      const cy = r.top + r.height / 2;
-      const dx = e.clientX - cx;
-      const dy = e.clientY - cy;
-      const dist = Math.hypot(dx, dy);
-      const radius = 220;
-      if (dist < radius) {
-        const power = Math.max(0, Math.min(2, (typeof settings.cursorPull === 'number' ? settings.cursorPull : 100) / 100));
-        const pull = (1 - dist / radius) * 0.12 * power;
-        setMagnet({ x: dx * pull, y: dy * pull });
-      } else {
-        setMagnet((m) => (m.x === 0 && m.y === 0 ? m : { x: 0, y: 0 }));
-      }
-    };
-    window.addEventListener('mousemove', handler);
-    return () => window.removeEventListener('mousemove', handler);
-  }, [isExpanded, settings.cursorPull]);
 
   // Expand on hover (with a short delay so merely passing the cursor over
   // the pill does not pop it open). We intentionally do NOT reset the active
@@ -298,9 +296,9 @@ function DynamicIsland({
   useEffect(() => {
     const handler = (event) => {
       if (dndActive) return;
-      // Respect notification toggles: caps lock / volume.
+      // Respect notification toggles: caps lock.
       if (event && event.type === 'capslock' && settings.capsNotif === false) return;
-      if (event && event.type === 'volume' && settings.volumeNotif === false) return;
+      if (event && event.type === 'volume') return; // Громкость обрабатывается отдельно через volumeState.
       setSystemEvent(event);
       const ms = (typeof settings.notifDuration === 'number' ? settings.notifDuration : 1.8) * 1000;
       setTimeout(() => setSystemEvent(null), ms);
@@ -310,6 +308,21 @@ function DynamicIsland({
     const unsub = window.electronAPI?.onSystemEvent?.(handler);
     return () => unsub?.();
   }, [settings.capsNotif, settings.volumeNotif, settings.notifDuration, dndActive]);
+
+  // Показываем баннер громкости при каждом изменении volumeState и обновляем ползунок.
+  useEffect(() => {
+    if (settings.volumeNotif === false) return;
+    if (!volumeState) return;
+    setVolumeBanner({ level: volumeState.level, muted: volumeState.muted });
+    if (volumeTimerRef.current) clearTimeout(volumeTimerRef.current);
+    volumeTimerRef.current = setTimeout(() => {
+      volumeTimerRef.current = null;
+      setVolumeBanner(null);
+    }, (typeof settings.notifDuration === 'number' ? settings.notifDuration : 1.8) * 1000);
+    return () => {
+      if (volumeTimerRef.current) clearTimeout(volumeTimerRef.current);
+    };
+  }, [volumeState?.level, volumeState?.muted, settings.volumeNotif, settings.notifDuration]);
 
   const lastBatteryRef = useRef(null);
   useEffect(() => {
@@ -329,10 +342,15 @@ function DynamicIsland({
   // the user's chosen accent. When disabled, the user's accent always wins
   // (with 'auto' meaning album color as a fallback).
   const followTrack = settings.accentFollowTrack !== false;
+  // If a custom theme is selected, its `dot` is the accent (unless the user
+  // explicitly picked another accent and disabled "accent follows track").
+  const customTheme = (settings.customThemes || []).find((t) => t.name === settings.theme);
+  const themeAccent = customTheme?.dot || null;
   const effectiveAccent =
     (isPlaying && (followTrack || settings.accent === 'auto') && accentColor)
       ? accentColor
-      : (userAccent || accentColor || '#ffffff');
+      : (themeAccent || userAccent || accentColor || '#ffffff');
+  const notifVariant = 'glass';
   const hasMedia = mediaState && mediaState.status !== 'no_session';
   // Real system-audio FFT levels (null when capture unavailable). Declared
   // after isPlaying to avoid a temporal-dead-zone error.
@@ -383,7 +401,7 @@ function DynamicIsland({
       setIsExpanded(false);
     });
     return () => unsub?.();
-  }, [isExpanded]);
+  }, [isExpanded, notification]);
 
   // Line source for the collapsed pill: word-level timings if available,
   // otherwise a parsed LRC fallback (many tracks only have syncedLyrics).
@@ -468,17 +486,19 @@ function DynamicIsland({
   // ----------------------------------------------------------
   const isAttached = displayMode === 'attached';
 
+
   const edgeFade = typeof settings.edgeFade === 'number' ? settings.edgeFade : 100;
   // Per-tab expanded sizes: each section gets just enough room, never full screen.
   const TAB_SIZES = {
-    player: { width: 480, height: 248 },
-    buffer: { width: 480, height: 300 },
-    shelf: { width: 480, height: 300 },
-    text: { width: 480, height: 320 },
-    focus: { width: 480, height: 258 },
-    weather: { width: 480, height: 220 },
+    player: { width: 440, height: 224 },
+    buffer: { width: 440, height: 272 },
+    shelf: { width: 440, height: 272 },
+    text: { width: 440, height: 292 },
+    focus: { width: 440, height: 238 },
+    weather: { width: 440, height: 210 },
   };
   const dimensions = useMemo(() => {
+
     const rad = Math.round((roundness / 100) * 40);
     const lower = Math.round(rad * Math.min(1, edgeFade / 100));
     if (isExpanded) {
@@ -507,13 +527,20 @@ function DynamicIsland({
         borderRadius: isAttached ? '0px 0px 20px 20px' : '20px',
       };
     }
-    const w = shouldShowMedia ? 356 : 340;
+    const w = shouldShowMedia ? 300 : 300;
     return {
       width: w,
-      height: 40,
-      borderRadius: isAttached ? '0px 0px 20px 20px' : '20px',
+      height: 36,
+      borderRadius: isAttached ? '0px 0px 18px 18px' : '18px',
     };
   }, [isExpanded, activeTab, shouldShowMedia, isAttached, isCopied, imageBanner, textBanner, download, roundness, edgeFade]);
+
+  const liveEdgeCss = dimensions.borderRadius;
+
+  // The pill and the expanded panel can be scaled independently.
+  const stateScalePercent = isExpanded
+    ? (typeof settings.expandedScale === 'number' ? settings.expandedScale : 100)
+    : (typeof settings.collapsedScale === 'number' ? settings.collapsedScale : 100);
 
   useEffect(() => {
     if (isExpanded) {
@@ -527,7 +554,7 @@ function DynamicIsland({
   // leaves empty space at any zoom level. The window must be big enough for
   // the visual size after the CSS scale(), plus a small margin for shadow.
   useEffect(() => {
-    const scale = Math.max(0.5, (typeof settings.scale === 'number' ? settings.scale : 100) / 100);
+    const scale = Math.max(0.5, stateScalePercent / 100);
     const MARGIN = 24;
     const w = Math.ceil(dimensions.width * scale) + MARGIN;
     const h = Math.ceil(dimensions.height * scale) + MARGIN;
@@ -540,7 +567,7 @@ function DynamicIsland({
       window.electronAPI?.setWindowSize?.(w, h);
     }, 40);
     return () => clearTimeout(t);
-  }, [dimensions.width, dimensions.height, settings.scale]);
+  }, [dimensions.width, dimensions.height, stateScalePercent]);
 
   const collapse = useCallback(() => setIsExpanded(false), []);
 
@@ -548,6 +575,7 @@ function DynamicIsland({
   // Collapsed content
   // ----------------------------------------------------------
   const renderCollapsed = () => {
+
     if (download && settings.downloadNotif !== false) {
       const total = download.totalBytes || 0;
       const recv = download.receivedBytes || 0;
@@ -664,10 +692,20 @@ function DynamicIsland({
     }
 
     if (notification) {
+      const durMs = (typeof settings.notifDuration === 'number' ? settings.notifDuration : 1.8) * 1000;
+      const age = notification.receivedAt ? Date.now() - notification.receivedAt : 0;
+      const left = durMs > 0 ? Math.max(0, Math.min(1, 1 - age / durMs)) : 1;
       return (
         <IslandToast
           keyName="notification"
           accent="rgba(99,179,237,0.25)"
+          variant={notifVariant}
+          position={settings.notifPosition || 'bottom'}
+          animation={settings.notifAnimation || 'slide'}
+          accentTint={settings.notifAccentTint !== false}
+          showIcon={settings.notifIcons !== false}
+          showProgress={settings.notifProgress !== false}
+          progress={settings.notifProgress !== false ? left : undefined}
           icon={(
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
@@ -675,15 +713,40 @@ function DynamicIsland({
             </svg>
           )}
           title={notification.app || 'Уведомление'}
-          subtitle={notification.title || ''}
+          subtitle={notification.title || notification.body || ''}
         />
+      );
+    }
+
+    if (volumeBanner) {
+      return (
+        <motion.div
+          key="sys-volume"
+          className="island-collapsed-content"
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 6 }}
+          transition={{ duration: 0.18 }}
+          style={{ justifyContent: 'flex-start', paddingLeft: '10px', gap: '10px', width: '100%' }}
+        >
+          <div className="island-thumb-circle" style={{ background: 'rgba(255,255,255,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M11 5 6 9H2v6h4l5 4z" />
+              <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+            </svg>
+          </div>
+          <span style={{ fontSize: '13px', fontWeight: 600, color: '#fff', whiteSpace: 'nowrap' }}>Громкость</span>
+          <div style={{ flex: 1, height: '4px', borderRadius: '2px', background: 'rgba(255,255,255,0.15)', margin: '0 8px', overflow: 'hidden' }}>
+            <div style={{ width: `${volumeBanner.level}%`, height: '100%', background: '#fff', borderRadius: '2px', transition: 'width 0.1s linear' }} />
+          </div>
+          <span style={{ fontSize: '13px', fontWeight: 600, color: 'rgba(255,255,255,0.7)', minWidth: '24px', textAlign: 'right' }}>{volumeBanner.level}</span>
+        </motion.div>
       );
     }
 
     if (systemEvent) {
       const accentMap = {
         capslock: 'rgba(255,196,0,0.22)',
-        volume: `${effectiveAccent}38`,
         battery: 'rgba(52,199,89,0.22)',
       };
       let icon = null;
@@ -695,14 +758,6 @@ function DynamicIsland({
           </svg>
         );
         title = systemEvent.enabled ? 'Caps Lock включён' : 'Caps Lock выключен';
-      } else if (systemEvent.type === 'volume') {
-        icon = (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M11 5 6 9H2v6h4l5 4z" />
-            <path d="M15.5 8.5a5 5 0 0 1 0 7" />
-          </svg>
-        );
-        title = `Громкость ${systemEvent.level}%`;
       } else if (systemEvent.type === 'battery') {
         icon = (
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -716,6 +771,12 @@ function DynamicIsland({
         <IslandToast
           keyName={`sys-${systemEvent.type}`}
           accent={accentMap[systemEvent.type] || 'rgba(255,255,255,0.15)'}
+          variant={notifVariant}
+          position={settings.notifPosition || 'bottom'}
+          animation={settings.notifAnimation || 'slide'}
+          accentTint={settings.notifAccentTint !== false}
+          showIcon={settings.notifIcons !== false}
+          showProgress={settings.notifProgress !== false}
           icon={icon}
           title={title}
         />
@@ -836,7 +897,7 @@ function DynamicIsland({
 
           <div className="music-pill-wave">
             {isPlaying ? (
-              <SoundWave color={effectiveAccent} size="large" power={settings.wavePower} clock={collapsedPos} spectrum={audioSpectrum} />
+              <SoundWave color={effectiveAccent} size="large" power={settings.wavePower} spectrum={audioSpectrum} />
             ) : (
               <motion.div
                 className="island-idle-dot"
@@ -860,15 +921,19 @@ function DynamicIsland({
       >
         <div className="idle-group-left">
           <span className="idle-clock">{currentTime}</span>
-          {settings.capslock !== false && <span className="idle-lang">{systemInfo?.lang || '—'}</span>}
+          {settings.capslock !== false && (
+            <span className="idle-lang">{systemInfo?.lang || '—'}</span>
+          )}
         </div>
         <div className="idle-group-right">
-          <span className="idle-weather">
-            {systemInfo?.weather
-              ? `${systemInfo.weather.icon} ${systemInfo.weather.temp}°`
-              : '—'}
-          </span>
-          <span className="idle-date">{formatDate(true)}</span>
+          {systemInfo?.weather && (
+            <span className="idle-weather">
+              {`${systemInfo.weather.icon} ${systemInfo.weather.temp}°`}
+            </span>
+          )}
+          {true && (
+            <span className="idle-date">{formatDate(true)}</span>
+          )}
           {settings.battery !== false && battery && (
             <span className="idle-battery">{battery.percent}%{battery.charging ? ' ⚡' : ''}</span>
           )}
@@ -918,11 +983,11 @@ function DynamicIsland({
   };
 
   return (
-    <div className={`island-container ${isAttached ? 'island-container--attached' : 'island-container--pill'}`} style={{ transform: `scale(${(typeof settings.scale === 'number' ? settings.scale : 100) / 100})`, transformOrigin: 'top center', height: '100%' }}>
+    <div className={`island-container ${isAttached ? 'island-container--attached' : 'island-container--pill'}`} style={{ transform: `scale(${stateScalePercent / 100})`, transformOrigin: 'top center', height: '100%' }}>
       <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', justifyContent: 'center' }}>
         <motion.div
           ref={islandRef}
-          className={`island ${isExpanded ? 'expanded' : 'collapsed'} ${isAttached ? 'island--attached' : 'island--pill'}`}
+          className={`island ${isExpanded ? 'expanded' : 'collapsed'} ${isAttached ? 'island--attached' : 'island--pill'} ${settings.liveEdge !== false ? 'island--live-edge' : ''}`}
         style={(() => {
           const t = settings.theme || 'Классика';
           const map = {
@@ -934,21 +999,17 @@ function DynamicIsland({
             'Закат': '#1c0f14',
             'Щелчок': '#0b0b0d',
           };
-          const shadows = [];
-          if (settings.shadow !== false) shadows.push('0 8px 30px rgba(0,0,0,0.55)');
-          if (settings.lightBorder !== false) shadows.push('inset 0 1px 0 rgba(255,255,255,0.08)');
-          const glass = settings.expGlass === true;
+          // Custom themes saved by the user override/extend the presets.
+          for (const ct of settings.customThemes || []) {
+            if (ct && ct.name && ct.bg) map[ct.name] = ct.bg;
+          }
           const base = map[t] || '#000000';
-          // Under glass keep a hint of the theme color so it does not vanish.
-          const glassBg = base === '#000000' ? 'rgba(20,20,24,0.55)' : `${base}cc`;
           return {
-            background: glass ? glassBg : base,
-            boxShadow: shadows.length ? shadows.join(', ') : 'none',
-            backdropFilter: glass ? 'blur(18px) saturate(1.3)' : undefined,
-            WebkitBackdropFilter: glass ? 'blur(18px) saturate(1.3)' : undefined,
+            '--island-bg': base,
+            background: base,
             cursor: isExpanded ? 'default' : 'pointer',
             pointerEvents: fullscreenHidden ? 'none' : undefined,
-            borderRadius: fullscreenHidden ? '8px' : dimensions.borderRadius,
+            borderRadius: fullscreenHidden ? '8px' : liveEdgeCss,
             overflow: 'hidden',
             // clip-path forces the actual clipping to follow the rounded shape
             // even while Framer's `layout` overrides border-radius mid-animation.
@@ -979,7 +1040,7 @@ function DynamicIsland({
               x: magnet.x,
               y: magnet.y,
               opacity: 1,
-              scale: (settings.liveDrop && isPlaying)
+              scale: 1
                 ? [1, 1 + 0.01 * Math.max(0, Math.min(2, (typeof settings.wavePower === 'number' ? settings.wavePower : 100) / 100)), 1]
                 : 1,
             }}
@@ -1054,6 +1115,17 @@ function DynamicIsland({
           }
         }}
       >
+        {/* Live edge — a liquid, audio-reactive wave along the bottom border. */}
+        {settings.liveEdge !== false && (
+          <LiveEdge
+            active
+            playing={isPlaying}
+            color={effectiveAccent}
+            power={settings.wavePower}
+            spectrum={audioSpectrum}
+          />
+        )}
+
         {/* Bottom inner glow — clipped by the island so it lights the inside
             of the bottom edge, not the outside. */}
         <div
@@ -1068,7 +1140,63 @@ function DynamicIsland({
             '--glow-color': isPlaying && effectiveAccent !== '#ffffff' ? effectiveAccent : 'transparent',
           }}
         />
-        <IslandBeats active={beatPulseActive} color={effectiveAccent} power={settings.beatPower} />
+
+        {/* Living background in the theme/accent color (optional). */}
+        {settings.artworkTheme === true && isExpanded && (
+          <div
+            aria-hidden="true"
+            className="island-living-bg"
+            style={{
+              position: 'absolute',
+              inset: 0,
+              pointerEvents: 'none',
+              background: `radial-gradient(120% 120% at 20% 0%, ${effectiveAccent}33 0%, transparent 55%), radial-gradient(120% 120% at 80% 100%, ${effectiveAccent}22 0%, transparent 55%)`,
+              animation: 'islandLivingBg 12s ease-in-out infinite alternate',
+            }}
+          />
+        )}
+
+        {/* Copy wave: a light sweep across the island when text is copied. */}
+        {settings.copyWave !== false && isCopied && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: 'absolute',
+              inset: 0,
+              pointerEvents: 'none',
+              background: `linear-gradient(90deg, transparent 0%, ${effectiveAccent}55 50%, transparent 100%)`,
+              animation: 'islandCopyWave 0.9s ease-out 1',
+            }}
+          />
+        )}
+
+        {/* Живая капля: низ колышется под музыку и тянется к курсору. */}
+        {isPlaying && (
+          <motion.div
+            aria-hidden="true"
+            style={{
+              position: 'absolute',
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: '6px',
+              pointerEvents: 'none',
+              background: `radial-gradient(ellipse at bottom, ${effectiveAccent}88, transparent 70%)`,
+              filter: 'blur(3px)',
+            }}
+            animate={{
+              y: [0, -2, 0, 2, 0],
+              scaleX: [1, 1.02, 1, 0.98, 1],
+            }}
+            transition={{
+              duration: 2.5,
+              repeat: Infinity,
+              ease: 'easeInOut',
+            }}
+          />
+        )}
+
+        <IslandBeats active={beatPulseActive} color={effectiveAccent} power={settings.beatPower} spectrum={audioSpectrum} />
 
         {/* Pomodoro remaining-time outline (conic gradient ring) */}
         {pomoState?.running && pomoState?.durationMs > 0 && (
@@ -1098,9 +1226,15 @@ function DynamicIsland({
             <motion.div
               key="expanded"
               className="island-expanded-content"
-              initial={{ opacity: 0, scale: 0.92 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.92 }}
+              initial={(() => {
+
+                return { opacity: 0, scale: 0.92 };
+              })()}
+              animate={(() => {
+
+                return { opacity: 1, scale: 1 };
+              })()}
+              exit={{ opacity: 0, scale: 0.85, y: -20 }}
               transition={{ duration: 0.2 }}
               style={{ '--accent': effectiveAccent, transition: '--accent 0.4s ease' }}
             >
@@ -1207,6 +1341,6 @@ function DynamicIsland({
       </div>
     </div>
   );
-}
+});
 
 export default DynamicIsland;
