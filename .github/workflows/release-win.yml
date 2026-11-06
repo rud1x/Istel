@@ -1,6 +1,8 @@
 name: Release Windows Installer
 
 on:
+  release:
+    types: [published]
   push:
     tags:
       - 'v*'
@@ -30,21 +32,31 @@ jobs:
       - name: Build renderer
         run: npm run build
 
-      - name: Build & publish installer
-        run: npx electron-builder --win --publish always
+      - name: Build installer
+        run: npx electron-builder --win --publish never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
 
-      - name: Upload installer as artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer
-          path: |
-            dist-electron/*.exe
-            dist-electron/*.blockmap
-            dist-electron/latest.yml
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Determine Tag
+        id: tag_name
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "release" ]; then
+            echo "TAG=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "push" ]; then
+            echo "TAG=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=v1.0.2" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload EXE to Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view ${{ steps.tag_name.outputs.TAG }} > /dev/null 2>&1; then
+            gh release create ${{ steps.tag_name.outputs.TAG }} --draft --title "Release ${{ steps.tag_name.outputs.TAG }}" --generate-notes
+            sleep 5
+          fi
+          gh release upload ${{ steps.tag_name.outputs.TAG }} dist-electron/*.exe dist-electron/latest.yml dist-electron/*.blockmap --clobber
