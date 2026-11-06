@@ -38,25 +38,40 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: false
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
 
-      - name: Determine Tag
-        id: tag_name
+      # Умное определение: если есть тег — берем его, иначе ищем последний релиз
+      - name: Get Latest Release Tag
+        id: get_tag
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "${{ github.event_name }}" == "release" ]; then
             echo "TAG=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" == "push" ]; then
             echo "TAG=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           else
-            echo "TAG=v1.0.2" >> $GITHUB_OUTPUT
+            # Если запуск ручной, ищем последний релиз в репозитории
+            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+            if [ -z "$TAG" ]; then
+              TAG="v1.1.0" # Фолбэк, если релизов вообще нет
+            fi
+            echo "TAG=$TAG" >> $GITHUB_OUTPUT
           fi
 
-      - name: Upload EXE to Release
+      - name: Upload EXE to Latest Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ! gh release view ${{ steps.tag_name.outputs.TAG }} > /dev/null 2>&1; then
-            gh release create ${{ steps.tag_name.outputs.TAG }} --draft --title "Release ${{ steps.tag_name.outputs.TAG }}" --generate-notes
+          TAG="${{ steps.get_tag.outputs.TAG }}"
+          echo "Uploading to release: $TAG"
+          
+          # Если релиза с таким тегом нет — создаем черновик
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG not found. Creating draft..."
+            gh release create "$TAG" --draft --title "Release $TAG" --generate-notes
             sleep 5
           fi
-          gh release upload ${{ steps.tag_name.outputs.TAG }} dist-electron/*.exe dist-electron/latest.yml dist-electron/*.blockmap --clobber
+          
+          # Загружаем файлы (--clobber перезапишет, если уже есть)
+          gh release upload "$TAG" dist-electron/*.exe dist-electron/latest.yml dist-electron/*.blockmap --clobber
